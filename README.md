@@ -152,6 +152,4 @@ runtime, and seed — for reproducibility:
 | 5 | Honest evaluation | `evaluation/` suite, judge, failure analysis |
 | 6 | Serving + portfolio | `serving/` vLLM + Docker, cards, diagram |
 
-## License
 
-Code: MIT (see `LICENSE`). The model and datasets carry their own licenses — verify `Qwen/Qwen3-1.7B-Base` (Apache-2.0), `jamescalam/ai-arxiv`, `HuggingFaceFW/fineweb-edu`, d2l.ai, and any scraped docs on their respective pages before use.
