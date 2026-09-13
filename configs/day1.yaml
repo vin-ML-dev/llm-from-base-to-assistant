@@ -1,0 +1,37 @@
+# Day 1 configuration — setup, foundations, exploration. No training here.
+# Everything downstream is config-driven; this is the first config.
+
+model:
+  # The base checkpoint for the whole project. BASE, not instruct — we build
+  # assistant behavior ourselves across CPT -> SFT -> DPO.
+  id: "Qwen/Qwen3-1.7B-Base"
+  revision: "main"          # pin to a specific commit hash for true reproducibility
+  # Development mule for cheap debugging (swap here, rerun any script):
+  #   id: "Qwen/Qwen3-0.6B-Base"
+
+  # Instruct sibling — NOT trained on. Kept only as a Day 5 baseline you can lose to.
+  instruct_baseline_id: "Qwen/Qwen3-1.7B"
+
+  dtype: "bfloat16"         # BF16 preferred when supported; falls back in code if not
+  device_map: "auto"
+  trust_remote_code: false
+
+  # A second tokenizer, only for the Day 1 "compare token counts" exercise:
+  compare_tokenizer_id: "gpt2"
+
+generation:
+  max_new_tokens: 64
+  # Settings compared in the Day 1 generation exercise:
+  temperatures: [0.0, 0.7, 1.2]
+  top_p: 0.9
+  top_k: 50
+
+dataset:
+  # The project's raw-text source. Day 1 only records the intent; Day 2 acts on it.
+  hf_id: "allenai/dolma"
+  domain_note: "Pick ONE coherent subset on Day 2 (e.g., encyclopedic/academic) for a clear specialization and low-hallucination-friendly text."
+  eval_heldout_dir: "data/eval_heldout"   # locked on Day 1, never trained on
+
+paths:
+  decisions_log: "docs/decisions.md"
+  before_evidence: "docs/before_evidence.md"

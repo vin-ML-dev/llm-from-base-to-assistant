@@ -1,0 +1,28 @@
+# Python cache / envs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ML artifacts (large — never commit weights/checkpoints)
+artifacts/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.gguf
+wandb/
+mlruns/
+
+# Heavy data (keep the eval-set guard README, ignore the actual data)
+data/raw/
+data/clean/
+data/packed/
+data/**/*.jsonl
+data/**/*.parquet
+data/**/*.txt
+!data/eval_heldout/README.md
+
+# OS junk
+.DS_Store
