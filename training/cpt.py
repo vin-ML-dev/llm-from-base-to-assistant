@@ -38,8 +38,18 @@ def main() -> None:
     print(f"train blocks: {len(train_ds)} | val blocks: {len(val_ds)}")
 
     tok = AutoTokenizer.from_pretrained(cfg["model"]["id"], revision=cfg["model"]["revision"])
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
+    # IMPORTANT: Qwen3-Base uses the SAME id for EOS and PAD. The default
+    # DataCollatorForLanguageModeling masks pad-token positions out of the loss,
+    # which would also mask the EOS tokens we put BETWEEN documents — so the model
+    # would never learn to predict EOS (i.e. never learn where a document ends /
+    # when to stop). We add a DISTINCT pad token so padding is masked but EOS is
+    # still learned. Blocks are all full-length (packing), so padding is rare, but
+    # this keeps EOS labels intact.
+    if tok.pad_token is None or tok.pad_token_id == tok.eos_token_id:
+        tok.add_special_tokens({"pad_token": "<|pad|>"})
+        _added_pad = True
+    else:
+        _added_pad = False
 
     # dtype arg name differs across transformers versions (torch_dtype -> dtype).
     import inspect as _inspect
@@ -53,11 +63,16 @@ def main() -> None:
     else:
         _load_kwargs["torch_dtype"] = _dt
     model = AutoModelForCausalLM.from_pretrained(cfg["model"]["id"], **_load_kwargs)
+    if _added_pad:
+        # we added a new special token → grow the embedding table to match
+        model.resize_token_embeddings(len(tok))
     if tcfg["gradient_checkpointing"]:
         model.gradient_checkpointing_enable()
         model.config.use_cache = False  # required with gradient checkpointing
 
-    # CLM data collator builds shifted labels on the fly (mlm=False -> causal).
+    # CLM collator builds shifted labels on the fly (mlm=False -> causal).
+    # Because PAD is now a DISTINCT token (not EOS), only real padding is masked
+    # from the loss; EOS tokens between documents keep their labels and ARE learned.
     collator = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False)
 
     out_dir = repo_root() / cfg["paths"]["cpt_output_dir"]
@@ -107,19 +122,39 @@ def main() -> None:
     trainer.save_model(str(out_dir))
     tok.save_pretrained(str(out_dir))
 
+    import transformers as _tf
+    import subprocess as _sp
+    def _git_commit():
+        try:
+            return _sp.check_output(["git", "rev-parse", "HEAD"],
+                                    cwd=str(repo_root())).decode().strip()
+        except Exception:
+            return None
+    def _resolve_revision(repo_id):
+        # turn a moving pointer like "main" into the immutable commit hash
+        try:
+            from huggingface_hub import HfApi
+            return HfApi().model_info(repo_id, revision=cfg["model"]["revision"]).sha
+        except Exception:
+            return cfg["model"]["revision"]
+
     peak_vram = (torch.cuda.max_memory_allocated() / 1024**3) if torch.cuda.is_available() else None
     lineage = {
         "stage": "cpt-v1",
         "parent_model": cfg["model"]["id"],
         "parent_revision": cfg["model"]["revision"],
+        "parent_revision_resolved": _resolve_revision(cfg["model"]["id"]),  # immutable hash
         "dataset_manifest": cfg["paths"]["manifest"],
         "block_size": cfg["tokenize"]["block_size"],
         "token_budget": cfg["tokenize"]["token_budget"],
         "learning_rate": tcfg["learning_rate"],
         "effective_batch": tcfg["per_device_batch_size"] * tcfg["grad_accum_steps"],
         "runtime_sec": round(runtime, 1),
-        "peak_vram_gb": round(peak_vram, 2) if peak_vram else None,
+        "peak_vram_gib": round(peak_vram, 2) if peak_vram else None,  # GiB, measured PyTorch alloc
         "seed": cfg["data"]["seed"],
+        "transformers_version": _tf.__version__,
+        "torch_version": torch.__version__,
+        "repo_commit": _git_commit(),
     }
     (out_dir / "lineage.json").write_text(json.dumps(lineage, indent=2))
     update_manifest(cfg["paths"]["manifest"], "cpt_train", lineage)

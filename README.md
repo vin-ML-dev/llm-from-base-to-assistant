@@ -40,9 +40,11 @@ llm-from-base-to-assistant/
 ## Day 1 — quick start
 
 ```bash
-# 1. Create and pin the environment
+# 1. Create the environment (Qwen3 needs transformers >= 4.51, < 5.0)
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+# On managed images (RunPod) use the Day 2 notebook's install cell instead — it
+# reconciles preinstalled packages so the notebook and CLI share one Python env.
 
 # 2. Confirm the base model loads and runs; record measured VRAM + tokens/sec
 python scripts/smoke_test.py --config configs/day1.yaml
@@ -70,7 +72,7 @@ Then fill in `docs/decisions.md` with your model + hardware decisions.
 - [ ] Tokenizer explored (tokens, IDs, special tokens, two-tokenizer comparison)
 - [ ] `print(model)` reviewed; params counted per component
 - [ ] Top-10 next-token probabilities inspected
-- [ ] Base model observed continuing text instead of answering (saved as before-evidence)
+- [ ] Base model behavior observed on the frozen prompts — it tends to *continue* text rather than answer as an assistant (save the actual outputs as before-evidence)
 - [ ] Generation settings (temp 0 / 0.7 / 1.2) compared
 - [ ] Held-out eval location locked
 - [ ] `docs/decisions.md` filled in
@@ -103,8 +105,10 @@ Or run `notebooks/day2_runner.ipynb` top-to-bottom on the rented GPU.
 ### Day 2 result (actual run)
 
 > **Continued pretraining reduced domain perplexity by 5.0% (8.40 → 7.98) while
-> general perplexity stayed flat (10.50 → 10.28, −2.1%)** — successful domain
-> specialization without catastrophic forgetting.
+> general perplexity moved only −2.1% (10.50 → 10.28)** on the measured held-out
+> sets — indicating domain specialization with no sign of general-perplexity
+> degradation in this run. (Perplexity on one general set is narrower than a full
+> test of general capabilities; treat this as an indicator, not a guarantee.)
 
 | model | domain ppl | general ppl |
 |---|---:|---:|
@@ -112,9 +116,14 @@ Or run `notebooks/day2_runner.ipynb` top-to-bottom on the rented GPU.
 | CPT  | 7.98 | 10.28 |
 | change | **−5.0%** | −2.1% |
 
-Run cost: **~11 minutes** of full fine-tuning, **~21 GB peak VRAM** on the A40
-(comfortably within 44 GB). The trained model is preserved on the Hugging Face Hub:
-[`vinmlops/cpt-v1`](https://huggingface.co/vinmlops/cpt-v1).
+*These are numbers from one recorded run; see `artifacts/cpt-v1/lineage.json` and
+`data/manifest.json` to reproduce/verify. Domain perplexity is measured on the
+locked held-out domain docs; general perplexity on a **separate** FineWeb-Edu slice
+that was **not** part of the training replay.*
+
+Run cost: **~11 min 54 s** of full fine-tuning, **~21 GiB measured peak PyTorch
+allocation** on the A40 (48 GB nominal). The trained model is preserved on the
+Hugging Face Hub: [`vinmlops/cpt-v1`](https://huggingface.co/vinmlops/cpt-v1).
 
 ### Checkpoint lineage (`artifacts/cpt-v1/lineage.json`)
 
@@ -141,6 +150,25 @@ runtime, and seed — for reproducibility:
 > 10–30M). On the A40 you're time-limited, not memory-limited, so it mostly costs a
 > longer session.
 
+### Cost accounting
+
+Measured on RunPod (A40, ~$0.40/hr). Thinking in cost is part of operating LLMs
+responsibly — these figures are tracked per stage.
+
+| Stage | Tokens | Time | Peak VRAM | ~Cost (training) | ~Cost (full session) |
+|---|---:|---:|---:|---:|---:|
+| CPT v1 | 3M | ~11 min 54 s | ~21 GiB | ~$0.08 | ~$0.41 |
+
+- The **full session** (~$0.41) includes data collection, scraping, cleaning,
+  model download, perplexity eval, and the Hub upload — not just training.
+- The **training itself** was ~11 min 54 s (713.6 s) ≈ ~$0.08 at ~$0.40/hr.
+- Projected 50M-token run (if speed scales linearly): ~3 h 18 m ≈ ~$1.32 (VRAM
+  unchanged at ~21 GiB).
+- "Peak VRAM" is the **measured peak PyTorch allocation in GiB**, not total device
+  memory (the A40 has 48 GB nominal).
+- Cost-saving note: data collection needs **no GPU** — it can run on a cheap CPU
+  instance or locally, reserving the GPU only for training.
+
 ## Roadmap
 
 | Day | Focus | Added to repo |
@@ -152,4 +180,20 @@ runtime, and seed — for reproducibility:
 | 5 | Honest evaluation | `evaluation/` suite, judge, failure analysis |
 | 6 | Serving + portfolio | `serving/` vLLM + Docker, cards, diagram |
 
+## License
 
+Code: MIT (see `LICENSE`). The model and datasets carry their own licenses — verify `Qwen/Qwen3-1.7B-Base` (Apache-2.0), `jamescalam/ai-arxiv`, `HuggingFaceFW/fineweb-edu`, d2l.ai, and any scraped docs on their respective pages before use.
+
+### Data usage disclaimer
+
+This is a **non-commercial, educational / research project.** The training data
+(papers, documentation, textbook material, and web text) is collected and used
+**solely for learning and demonstration** — to study the fine-tuning pipeline — and
+**not for any commercial purpose**. Each source retains its own license and terms;
+this project does not redistribute the raw data and makes no claim of ownership over
+it. Anyone reusing this repository is responsible for verifying and complying with
+the license of each individual data source before using it, especially for any
+commercial use. **Note in particular that individual arXiv papers carry their own
+licenses** (many are not open-license), so a blanket "educational use" statement
+does not by itself grant reuse rights for every paper. If you are a rights holder
+and have concerns about a source, please open an issue.

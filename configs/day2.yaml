@@ -82,9 +82,12 @@ train:
   num_epochs: 1                           # CPT usually << many epochs; token_budget caps it anyway
   bf16: true
   gradient_checkpointing: true            # trade compute for memory (allows the above batch)
-  logging_steps: 10
-  save_steps: 200
-  eval_steps: 100                         # watch validation loss for overfitting/forgetting
+  logging_steps: 5
+  save_steps: 25                          # fires during short runs (~92 steps at 3M tokens)
+  eval_steps: 20                          # watch validation loss for overfitting/forgetting
+  # NOTE: with a 3M-token budget, 1024 blocks and effective batch 32 you get only
+  # ~90 optimizer steps. Keep these small so eval/checkpoints actually trigger.
+  # For a larger token_budget (e.g. 50M) you can raise them proportionally.
 
 evaluation:
   # Perplexity is measured on fixed held-out text for BASE vs CPT.

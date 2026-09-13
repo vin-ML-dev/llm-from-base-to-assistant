@@ -81,8 +81,14 @@ def main() -> None:
 
     domain_texts = load_texts(
         f"{cfg['paths']['eval_heldout_dir']}/heldout.jsonl", cfg["evaluation"]["domain_ppl_docs"])
+    # Use the SEPARATE held-out general set (never trained on) — NOT the training
+    # replay slice — so 'did it forget general skills?' is measured honestly.
     general_texts = load_texts(
-        f"{cfg['paths']['clean_dir']}/replay.jsonl", cfg["evaluation"]["general_ppl_docs"])
+        f"{cfg['paths']['eval_heldout_dir']}/general_eval.jsonl", cfg["evaluation"]["general_ppl_docs"])
+    if not general_texts:  # fallback if general_eval wasn't collected
+        general_texts = load_texts(
+            f"{cfg['paths']['clean_dir']}/replay.jsonl", cfg["evaluation"]["general_ppl_docs"])
+        print("  ⚠ using training-replay for general ppl (not a clean held-out set)")
     if not domain_texts or not general_texts:
         print("Missing eval texts — run the data pipeline first.")
         return

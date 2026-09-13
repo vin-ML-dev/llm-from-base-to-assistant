@@ -181,6 +181,35 @@ def collect_replay(cfg) -> list[dict]:
     return rows
 
 
+def collect_general_eval(cfg) -> list[dict]:
+    """A SEPARATE general held-out set for honest forgetting evaluation.
+    Streamed from the SAME general corpus but from a DIFFERENT slice than the
+    training replay — so it was never trained on. This is what makes the
+    'did it forget general skills?' comparison trustworthy."""
+    from datasets import load_dataset
+
+    name = cfg["data"]["replay_dataset"]
+    subset = cfg["data"].get("replay_subset")
+    train_cap = max(200, cfg["data"]["arxiv_max_docs"] // 2)   # what replay used
+    eval_cap = cfg["evaluation"]["general_ppl_docs"]
+    print(f"[general-eval] streaming a held-out slice of {name} (skip first {train_cap}) ...")
+    try:
+        ds = load_dataset(name, subset, split="train", streaming=True)
+    except Exception:
+        ds = load_dataset(name, split="train", streaming=True)
+    rows = []
+    for i, ex in enumerate(ds):
+        if i < train_cap + 500:          # skip past the training-replay slice + a gap
+            continue
+        text = ex.get("text") or ""
+        if text:
+            rows.append({"source": "general_eval", "id": f"fineweb-eval-{i}", "text": text})
+        if len(rows) >= eval_cap:
+            break
+    print(f"[general-eval] collected {len(rows)} held-out general docs")
+    return rows
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="configs/day2.yaml")
@@ -189,10 +218,12 @@ def main() -> None:
     args = ap.parse_args()
     cfg = load_config(args.config)
     ensure_dir(cfg["paths"]["raw_dir"])
+    ensure_dir(cfg["paths"]["eval_heldout_dir"])
 
     papers = collect_arxiv(cfg)
     docs = [] if args.skip_docs else collect_docs(cfg)
     replay = collect_replay(cfg)
+    general_eval = collect_general_eval(cfg)   # SEPARATE held-out general set
 
     # theory sources (beginner -> advanced explanatory prose)
     theory_web, d2l, surveys = [], [], []
@@ -208,10 +239,12 @@ def main() -> None:
     n4 = write_jsonl(f"{rd}/theory_web.jsonl", theory_web)
     n5 = write_jsonl(f"{rd}/theory_d2l.jsonl", d2l)
     n6 = write_jsonl(f"{rd}/theory_surveys.jsonl", surveys)
+    n7 = write_jsonl(f"{cfg['paths']['eval_heldout_dir']}/general_eval.jsonl", general_eval)
 
     update_manifest(cfg["paths"]["manifest"], "collect", {
         "arxiv_docs": n1, "doc_pages": n2, "replay_docs": n3,
         "theory_web_pages": n4, "d2l_sections": n5, "survey_abstracts": n6,
+        "general_eval_docs": n7,
         "arxiv_dataset": cfg["data"]["arxiv_dataset"],
         "replay_dataset": cfg["data"]["replay_dataset"],
         "doc_seed_urls": cfg["data"]["doc_seed_urls"],
@@ -219,7 +252,7 @@ def main() -> None:
         "d2l_chapters": cfg["data"]["d2l_chapters"],
     })
     print(f"\nRaw collected → papers={n1}, docs={n2}, replay={n3}, "
-          f"theory_web={n4}, d2l={n5}, surveys={n6}")
+          f"theory_web={n4}, d2l={n5}, surveys={n6}, general_eval={n7}")
     print("Next: python data/clean.py --config configs/day2.yaml")
 
 
