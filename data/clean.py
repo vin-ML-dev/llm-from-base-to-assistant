@@ -1,83 +1,85 @@
-"""Day 2 · Step 2 — CLEAN + DEDUPLICATE.
+"""
+Step 2 — CLEAN + DEDUPLICATE.
 
-Reads data/raw/*.jsonl, normalizes text, drops junk/short docs, removes exact
-duplicates (by normalized-text hash), and writes data/clean/*.jsonl.
-Logs how many docs were removed (goes into the manifest / dataset card).
+Reads data/raw/*.jsonl, normalizes the text, drops documents that are too short,
+removes exact duplicates (by normalized-text hash), and writes data/clean/*.jsonl.
 
 Usage:
-    python data/clean.py --config configs/day2.yaml
+    python clean.py --config day2_cpt.yaml
 """
-from __future__ import annotations
 
 import argparse
 import re
 
-from dataio import ensure_dir, load_config, read_jsonl, text_hash, update_manifest, write_jsonl
+from dataio import ensure_dir, load_config, read_jsonl, text_hash, write_jsonl
 
-RAW_FILES = ["domain_papers.jsonl", "domain_docs.jsonl", "replay.jsonl",
-             "theory_web.jsonl", "theory_d2l.jsonl", "theory_surveys.jsonl"]
+# Files produced by collect.py that we clean here (replay is cleaned too, so it
+# gets deduplicated against the domain docs).
+RAW_FILES = ["domain_papers.jsonl", "domain_docs.jsonl", "replay.jsonl"]
+
+# Common scraped-page boilerplate lines to drop.
+BOILERPLATE = {
+    "edit this page",
+    "copied",
+    "join the hugging face community",
+    "table of contents",
+}
 
 
-def normalize(text: str) -> str:
+def normalize(text):
+    """Standardize whitespace and strip obvious navigation/boilerplate lines."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"[ \t]+", " ", text)          # collapse spaces/tabs
-    text = re.sub(r"\n{3,}", "\n\n", text)        # collapse blank lines
-    # drop obvious nav/boilerplate lines common in scraped docs
-    lines = []
-    for ln in text.split("\n"):
-        s = ln.strip()
-        if not s:
-            lines.append("")
+    text = re.sub(r"[ \t]+", " ", text)      # collapse runs of spaces/tabs
+    text = re.sub(r"\n{3,}", "\n\n", text)    # collapse 3+ blank lines into one
+
+    kept_lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.lower() in BOILERPLATE:
             continue
-        low = s.lower()
-        if low in {"edit this page", "copied", "join the hugging face community", "table of contents"}:
-            continue
-        lines.append(s)
-    return "\n".join(lines).strip()
+        kept_lines.append(stripped)
+    return "\n".join(kept_lines).strip()
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="configs/day2.yaml")
-    args = ap.parse_args()
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="day2_cpt.yaml")
+    args = parser.parse_args()
+
     cfg = load_config(args.config)
     ensure_dir(cfg["paths"]["clean_dir"])
     min_chars = cfg["data"]["min_doc_chars"]
 
-    seen_hashes: set[str] = set()
-    stats = {}
+    seen_hashes = set()  # shared across files, so duplicates across sources are caught
 
     for fname in RAW_FILES:
-        raw_path = f"{cfg['paths']['raw_dir']}/{fname}"
-        try:
-            rows = list(read_jsonl(raw_path))
-        except FileNotFoundError:
-            print(f"[clean] {fname} not found, skipping")
+        rows = read_jsonl(f"{cfg['paths']['raw_dir']}/{fname}")
+        if not rows:
+            print(f"[clean] {fname}: not found or empty, skipping")
             continue
 
-        kept, dropped_short, dropped_dup = [], 0, 0
+        kept = []
+        dropped_short = 0
+        dropped_dup = 0
         for row in rows:
-            clean_text = normalize(row.get("text", ""))
-            if len(clean_text) < min_chars:
+            text = normalize(row.get("text", ""))
+            if len(text) < min_chars:
                 dropped_short += 1
                 continue
-            h = text_hash(clean_text)
+            h = text_hash(text)
             if h in seen_hashes:
                 dropped_dup += 1
                 continue
             seen_hashes.add(h)
-            row["text"] = clean_text
+            row["text"] = text
             row["hash"] = h
             kept.append(row)
 
-        out = f"{cfg['paths']['clean_dir']}/{fname}"
-        n = write_jsonl(out, kept)
-        stats[fname] = {"kept": n, "dropped_short": dropped_short, "dropped_duplicate": dropped_dup}
+        n = write_jsonl(f"{cfg['paths']['clean_dir']}/{fname}", kept)
         print(f"[clean] {fname}: kept {n}, dropped_short {dropped_short}, dropped_dup {dropped_dup}")
 
-    update_manifest(cfg["paths"]["manifest"], "clean", stats)
-    print("\nTip: open a few files in data/clean/ and read ~20 docs by hand before continuing.")
-    print("Next: python data/split.py --config configs/day2.yaml")
+    print("\nTip: open a few files in data/clean/ and read some docs by hand before continuing.")
+    print("Next: python split.py --config day2_cpt.yaml")
 
 
 if __name__ == "__main__":

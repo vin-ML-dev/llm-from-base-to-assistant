@@ -1,37 +1,29 @@
 # Day 2 configuration — data pipeline + continued pretraining (CPT).
-# Full fine-tuning of Qwen3-1.7B-Base on an LLM/ML domain corpus, on an A40 (~44GB).
-# Everything here is editable; the scripts and notebook read from this file.
+# Conservative CPT of Qwen3-1.7B-Base on an LLM/ML corpus, targeting one A40 (~44GB).
 
 model:
-  id: "Qwen/Qwen3-1.7B-Base"        # the base we adapt (from Day 1)
-  revision: "main"
-  dtype: "bfloat16"                  # A40 supports BF16
-  # Dev mule for a fast dry run: "Qwen/Qwen3-0.6B-Base"
+  id: "Qwen/Qwen3-1.7B-Base"
+  revision: "main"                     # cpt.py resolves this to an immutable HF commit at runtime
+  dtype: "bfloat16"
 
 data:
-  # ---- domain sources (the specialization) ----
-  arxiv_dataset: "jamescalam/ai-arxiv"   # LLM/ML papers with full text
-  arxiv_max_docs: 400                     # cap papers pulled (keep the corpus small + coherent)
+  # ---- domain sources ----
+  arxiv_dataset: "jamescalam/ai-arxiv"
+  arxiv_max_docs: 400
 
-  # HF / PyTorch docs to scrape (direct website scraping — more current, more fragile).
-  # Start pages; the scraper stays within these domains and follows in-section links.
   doc_seed_urls:
     - "https://huggingface.co/docs/transformers/index"
     - "https://huggingface.co/docs/peft/index"
     - "https://huggingface.co/docs/trl/index"
     - "https://pytorch.org/docs/stable/index.html"
-  doc_max_pages: 150                      # cap scraped pages
-  doc_request_delay_sec: 0.5              # be polite to the servers
+  doc_max_pages: 150
+  doc_request_delay_sec: 0.5
 
-  # ---- theory sources (beginner -> advanced explanatory prose) ----
-  # HF blog + HF LLM Course: scraped from their sites (blog-style + course prose).
   theory_seed_urls:
     - "https://huggingface.co/blog"
     - "https://huggingface.co/learn/llm-course/en/chapter1/1"
   theory_max_pages: 120
 
-  # d2l.ai (Dive into Deep Learning): pulled from the GitHub source as clean Markdown
-  # (better than scraping HTML with math). Chapters most relevant to an LLM tutor.
   d2l_github_raw: "https://raw.githubusercontent.com/d2l-ai/d2l-en/master"
   d2l_chapters:
     - "chapter_attention-mechanisms-and-transformers"
@@ -42,55 +34,74 @@ data:
     - "chapter_linear-regression"
     - "chapter_natural-language-processing-pretraining"
 
-  # arXiv SURVEY papers (readable overviews). Query the arXiv API for surveys.
   arxiv_survey_query: "large language models survey"
   arxiv_survey_max: 40
 
-  # ---- general replay (anti-forgetting) ----
+  # ---- general replay / anti-forgetting ----
   replay_dataset: "HuggingFaceFW/fineweb-edu"
-  replay_subset: "sample-10BT"            # a small standard sample config
-  replay_streaming: true                  # stream instead of downloading the whole thing
+  replay_subset: "sample-10BT"
+  replay_max_docs: 800
+  replay_ratio: 0.15
 
-  # ---- mixture + splitting ----
-  replay_ratio: 0.15                      # 15% general replay, 85% domain (edit here)
-  eval_heldout_frac: 0.10                 # fraction of DOMAIN docs held out for final eval
-  val_frac: 0.05                          # fraction for validation (watched during training)
-  min_doc_chars: 300                      # drop docs shorter than this after cleaning
+  eval_heldout_frac: 0.10
+  val_frac: 0.05
+  min_doc_chars: 300
   seed: 42
 
 tokenize:
-  block_size: 1024                        # packed block length (first-run friendly)
-  token_budget: 3_000_000                 # ~1–3M token cap for the CPT run (edit here)
+  block_size: 1024
+  token_budget: 3_000_000
 
 paths:
-  raw_dir: "data/raw"                     # extracted, pre-clean text
-  clean_dir: "data/clean"                 # cleaned + deduped text
-  packed_dir: "data/packed"               # tokenized + packed blocks (train/val)
-  eval_heldout_dir: "data/eval_heldout"   # locked on Day 1; populated here
-  manifest: "data/manifest.json"          # dataset provenance + counts + hashes
-  cpt_output_dir: "artifacts/cpt-v1"      # the domain-adapted checkpoint
+  raw_dir: "data/raw"
+  clean_dir: "data/clean"
+  packed_dir: "data/packed"
+  eval_heldout_dir: "data/eval_heldout"
+  manifest: "data/manifest.json"
+  cpt_output_dir: "artifacts/cpt-v1"
 
 train:
-  # Full fine-tuning (all weights) — fits a 1.7B model on ~44GB A40.
-  learning_rate: 2.0e-5                   # small LR for CPT (nudge, don't rebuild)
+  # LoRA is intentionally used for this small CPT run. The final adapter is merged
+  # into the BASE weights, so artifacts/cpt-v1 is still a normal standalone model.
+  method: "full"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"]
+
+  # More conservative than the previous 2e-4 setting because the corpus is only ~3M tokens.
+  learning_rate: 1.0e-4
   lr_scheduler_type: "cosine"
-  warmup_ratio: 0.03                      # short warmup to avoid shocking pretrained weights
+  warmup_ratio: 0.05
   weight_decay: 0.01
-  max_grad_norm: 1.0                      # gradient clipping
-  per_device_batch_size: 4                # micro-batch; lower if you OOM
-  grad_accum_steps: 8                     # effective batch = 4 x 8 = 32 blocks
-  num_epochs: 1                           # CPT usually << many epochs; token_budget caps it anyway
+  max_grad_norm: 1.0
+
+  per_device_batch_size: 4
+  grad_accum_steps: 8                  # effective batch = 32 x 1024-token blocks
+  num_epochs: 1
   bf16: true
-  gradient_checkpointing: true            # trade compute for memory (allows the above batch)
+  gradient_checkpointing: true
+
   logging_steps: 5
-  save_steps: 25                          # fires during short runs (~92 steps at 3M tokens)
-  eval_steps: 20                          # watch validation loss for overfitting/forgetting
-  # NOTE: with a 3M-token budget, 1024 blocks and effective batch 32 you get only
-  # ~90 optimizer steps. Keep these small so eval/checkpoints actually trigger.
-  # For a larger token_budget (e.g. 50M) you can raise them proportionally.
+  save_steps: 25
+  eval_steps: 20
+
+  # Safety checks added after the broken run.
+  clean_output_dir: true               # prevents stale broken tokenizer/adapter files surviving a rerun
+  require_eos_in_packed: true          # abort CPT if the packed stream has no EOS/document boundaries
+
+comparison:
+  # BASE is generated before training; CPT is generated after merge, using exactly
+  # the same tokenizer, raw prompts, greedy decoding, and token limit.
+  max_new_tokens: 128
+  prompts:
+    - "What is attention in a transformer?"
+    - "Explain what a tokenizer does, simply."
+    - "Give me three tips for fine-tuning an LLM."
+    - "Who are you?"
 
 evaluation:
-  # Perplexity is measured on fixed held-out text for BASE vs CPT.
-  domain_ppl_docs: 50                     # held-out DOMAIN docs for domain perplexity
-  general_ppl_docs: 50                    # general (replay-source) docs for general perplexity
-  max_ppl_tokens: 100_000                 # cap tokens scored per perplexity measurement
+  domain_ppl_docs: 50
+  general_ppl_docs: 50
+  max_ppl_tokens: 100_000

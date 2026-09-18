@@ -102,83 +102,19 @@ Or run `notebooks/day2_runner.ipynb` top-to-bottom on the rented GPU.
 > unused `torchaudio`. All script calls use `{sys.executable}` so they run under the
 > notebook kernel's Python.
 
-### Day 2 result (actual run)
+---
 
-> **Continued pretraining reduced domain perplexity by 5.0% (8.40 → 7.98) while
-> general perplexity moved only −2.1% (10.50 → 10.28)** on the measured held-out
-> sets — indicating domain specialization with no sign of general-perplexity
-> degradation in this run. (Perplexity on one general set is narrower than a full
-> test of general capabilities; treat this as an indicator, not a guarantee.)
+## Day 2 — results
 
-| model | domain ppl | general ppl |
-|---|---:|---:|
-| BASE | 8.40 | 10.50 |
-| CPT  | 7.98 | 10.28 |
-| change | **−5.0%** | −2.1% |
+1. **Perplexity (lower is better):** BASE → CPT: domain `7.54 → 6.76`, general `10.62 → 11.13`.
+2. **Domain:** `-10.3%` perplexity — evidence of domain specialization.
+3. **General:** `+4.8%` perplexity — a measurable forgetting signal.
+4. **Qualitative check:** on the same greedy-decoded prompts, CPT gives more domain-relevant explanations for attention and tokenization.
+5. **Instruction following:** prompts such as “Give me three tips for fine-tuning an LLM” still show continuation/repetition instead of reliable instruction following.
+6. **Expected behavior:** BASE and CPT are completion models, not chat-tuned assistants; repetition and weak stopping behavior at this stage are expected.
+7. **Day 2 conclusion:** `cpt-v1` improved domain modeling while preserving a clear reason for Day 3 SFT — instruction following, response structure, and stopping behavior.
 
-*These are numbers from one recorded run; see `artifacts/cpt-v1/lineage.json` and
-`data/manifest.json` to reproduce/verify. Domain perplexity is measured on the
-locked held-out domain docs; general perplexity on a **separate** FineWeb-Edu slice
-that was **not** part of the training replay.*
-
-Run cost: **~11 min 54 s** of full fine-tuning, **~21 GiB measured peak PyTorch
-allocation** on the A40 (48 GB nominal). The trained model is preserved on the
-Hugging Face Hub: [`vinmlops/cpt-v1`](https://huggingface.co/vinmlops/cpt-v1).
-
-### Checkpoint lineage (`artifacts/cpt-v1/lineage.json`)
-
-Every checkpoint records exactly how it was made — parent model, data, hyperparameters,
-runtime, and seed — for reproducibility:
-
-```json
-{
-  "stage": "cpt-v1",
-  "parent_model": "Qwen/Qwen3-1.7B-Base",
-  "parent_revision": "main",
-  "dataset_manifest": "data/manifest.json",
-  "block_size": 1024,
-  "token_budget": 3000000,
-  "learning_rate": 2e-05,
-  "effective_batch": 32,
-  "runtime_sec": 713.6,
-  "peak_vram_gb": 21.26,
-  "seed": 42
-}
-```
-
-> Want a bigger domain effect? Raise `token_budget` in `configs/day2.yaml` (e.g. to
-> 10–30M). On the A40 you're time-limited, not memory-limited, so it mostly costs a
-> longer session.
-
-### Cost accounting
-
-Measured on RunPod (A40, ~$0.40/hr). Thinking in cost is part of operating LLMs
-responsibly — these figures are tracked per stage.
-
-| Stage | Tokens | Time | Peak VRAM | ~Cost (training) | ~Cost (full session) |
-|---|---:|---:|---:|---:|---:|
-| CPT v1 | 3M | ~11 min 54 s | ~21 GiB | ~$0.08 | ~$0.41 |
-
-- The **full session** (~$0.41) includes data collection, scraping, cleaning,
-  model download, perplexity eval, and the Hub upload — not just training.
-- The **training itself** was ~11 min 54 s (713.6 s) ≈ ~$0.08 at ~$0.40/hr.
-- Projected 50M-token run (if speed scales linearly): ~3 h 18 m ≈ ~$1.32 (VRAM
-  unchanged at ~21 GiB).
-- "Peak VRAM" is the **measured peak PyTorch allocation in GiB**, not total device
-  memory (the A40 has 48 GB nominal).
-- Cost-saving note: data collection needs **no GPU** — it can run on a cheap CPU
-  instance or locally, reserving the GPU only for training.
-
-## Roadmap
-
-| Day | Focus | Added to repo |
-|----|----|----|
-| 1 ✅ | Setup + foundations | env, configs, exploration scripts, eval lock |
-| 2 ✅ | Data + continued pretraining | `data/` pipeline, `training/cpt.py`, `evaluation/perplexity.py` |
-| 3 | SFT | instruction data, `training/sft.py`, masking test |
-| 4 | DPO | preference data, `training/dpo.py` |
-| 5 | Honest evaluation | `evaluation/` suite, judge, failure analysis |
-| 6 | Serving + portfolio | `serving/` vLLM + Docker, cards, diagram |
+---
 
 ## License
 

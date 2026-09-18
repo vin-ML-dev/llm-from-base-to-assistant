@@ -1,91 +1,97 @@
-"""Day 2 · Step 4 — TOKENIZE + PACK.
+"""
+Step 4 — TOKENIZE + PACK.
 
-Turns the split text pools into fixed-length token blocks for CPT.
-  - tokenizes with Qwen3's tokenizer (same frozen vocab from Day 1)
-  - concatenates into one stream with EOS between documents, slices into
-    block_size chunks (the standard CLM 'group_texts' packing)
-  - enforces the 85/15 domain:replay mixture in the TRAIN pool
-  - caps total training tokens at token_budget
+Turns the split text pools into fixed-length token blocks for training:
+  - tokenizes with the base model's tokenizer
+  - joins documents into one long token stream with an EOS token between each
+    document (this is what teaches the model where documents end)
+  - slices that stream into equal block_size chunks
+  - keeps an 85/15 domain:replay token mixture and caps total tokens at token_budget
 
-Writes packed blocks to data/packed/ as a saved HF dataset (train + val).
+Writes packed blocks to data/packed/{train,val} as a saved HuggingFace dataset.
 
 Usage:
-    python data/tokenize_pack.py --config configs/day2.yaml
+    python tokenize_pack.py --config day2_cpt.yaml
 """
-from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
-from dataio import ensure_dir, load_config, read_jsonl, repo_root, update_manifest
+from dataio import load_config, read_jsonl
 
 
-def pack_stream(token_lists, block_size, eos_id, max_tokens=None):
-    """Concatenate token lists (EOS between docs), slice into equal blocks."""
-    buf, blocks, total = [], [], 0
+def pack(token_lists, block_size, eos_id, max_tokens):
+    """
+    Concatenate documents into one stream (EOS after each), then cut into blocks
+    of exactly block_size tokens. Stops once max_tokens is reached. Any leftover
+    tokens that don't fill a full final block are dropped.
+    """
+    buffer = []
+    blocks = []
+    total = 0
     for ids in token_lists:
-        buf.extend(ids)
-        buf.append(eos_id)
-        while len(buf) >= block_size:
-            blocks.append(buf[:block_size])
-            buf = buf[block_size:]
+        buffer.extend(ids)
+        buffer.append(eos_id)  # document boundary
+        while len(buffer) >= block_size:
+            blocks.append(buffer[:block_size])
+            buffer = buffer[block_size:]
             total += block_size
             if max_tokens and total >= max_tokens:
                 return blocks, total
     return blocks, total
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="configs/day2.yaml")
-    args = ap.parse_args()
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="day2_cpt.yaml")
+    args = parser.parse_args()
+
     cfg = load_config(args.config)
 
     from datasets import Dataset
     from transformers import AutoTokenizer
 
-    block = cfg["tokenize"]["block_size"]
+    block_size = cfg["tokenize"]["block_size"]
     budget = cfg["tokenize"]["token_budget"]
     replay_ratio = cfg["data"]["replay_ratio"]
 
-    tok = AutoTokenizer.from_pretrained(cfg["model"]["id"], revision=cfg["model"]["revision"])
-    eos = tok.eos_token_id
+    tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["id"])
+    eos_id = tokenizer.eos_token_id
 
-    # --- load pools ---
-    train_rows = list(read_jsonl(f"{cfg['paths']['clean_dir']}/pool_train.jsonl"))
-    val_rows = list(read_jsonl(f"{cfg['paths']['clean_dir']}/pool_val.jsonl"))
+    # --- load the pools produced by split.py ---
+    train_rows = read_jsonl(f"{cfg['paths']['clean_dir']}/pool_train.jsonl")
+    val_rows = read_jsonl(f"{cfg['paths']['clean_dir']}/pool_val.jsonl")
     domain_rows = [r for r in train_rows if r["kind"] == "domain"]
     replay_rows = [r for r in train_rows if r["kind"] == "replay"]
 
-    def toks(rows):
-        return [tok(r["text"], add_special_tokens=False)["input_ids"] for r in rows]
+    def tokenize(rows):
+        return [tokenizer(r["text"], add_special_tokens=False)["input_ids"] for r in rows]
 
-    # --- budget split by mixture: 85% domain / 15% replay ---
+    # --- split the token budget by the desired mixture ---
     domain_budget = int(budget * (1 - replay_ratio))
     replay_budget = budget - domain_budget
 
-    dom_blocks, dom_tok = pack_stream(toks(domain_rows), block, eos, domain_budget)
-    rep_blocks, rep_tok = pack_stream(toks(replay_rows), block, eos, replay_budget)
-    train_blocks = dom_blocks + rep_blocks
+    domain_blocks, domain_tokens = pack(tokenize(domain_rows), block_size, eos_id, domain_budget)
+    replay_blocks, replay_tokens = pack(tokenize(replay_rows), block_size, eos_id, replay_budget)
+    train_blocks = domain_blocks + replay_blocks
 
-    val_blocks, val_tok = pack_stream(toks(val_rows), block, eos, budget // 10)
+    # validation uses a smaller budget
+    val_blocks, val_tokens = pack(tokenize(val_rows), block_size, eos_id, budget // 10)
 
-    ensure_dir(cfg["paths"]["packed_dir"])
-    out = repo_root() / cfg["paths"]["packed_dir"]
+    # --- save to disk ---
+    out = Path(cfg["paths"]["packed_dir"])
+    out.mkdir(parents=True, exist_ok=True)
     Dataset.from_dict({"input_ids": train_blocks}).save_to_disk(str(out / "train"))
     Dataset.from_dict({"input_ids": val_blocks}).save_to_disk(str(out / "val"))
 
-    result = {
-        "block_size": block, "replay_ratio": replay_ratio,
-        "train_blocks": len(train_blocks), "train_tokens": dom_tok + rep_tok,
-        "domain_tokens": dom_tok, "replay_tokens": rep_tok,
-        "val_blocks": len(val_blocks), "val_tokens": val_tok,
-        "token_budget": budget,
-    }
-    update_manifest(cfg["paths"]["manifest"], "tokenize_pack", result)
-    print("[pack]", result)
-    print(f"  domain:replay actual = {dom_tok}:{rep_tok} "
-          f"(~{100*dom_tok/max(1,dom_tok+rep_tok):.0f}% domain)")
-    print("Next: python training/cpt.py --config configs/day2.yaml")
+    train_total = domain_tokens + replay_tokens
+    domain_pct = 100 * domain_tokens / max(1, train_total)
+    print(
+        f"[pack] train_blocks={len(train_blocks)} train_tokens={train_total} "
+        f"(domain={domain_tokens}, replay={replay_tokens}, ~{domain_pct:.0f}% domain)"
+    )
+    print(f"[pack] val_blocks={len(val_blocks)} val_tokens={val_tokens}")
+    print("Next: python cpt.py --config day2_cpt.yaml")
 
 
 if __name__ == "__main__":
