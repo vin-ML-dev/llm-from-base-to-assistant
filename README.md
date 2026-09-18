@@ -116,6 +116,164 @@ Or run `notebooks/day2_runner.ipynb` top-to-bottom on the rented GPU.
 
 ---
 
+
+## Day 3 — SFT
+
+### Quick start
+
+```bash
+# 0. install (RunPod-safe) + restart kernel
+pip install -r requirements.txt --ignore-installed blinker
+pip install -U "transformers>=4.51,<5.0" "trl>=0.9.6" "peft>=0.12.0" "vllm>=0.5.4" torch
+pip uninstall -y torchaudio
+
+# 1. generate Q&A with the 14B teacher (loads, runs, UNLOADS)
+python data/generate_sft.py  --config configs/day3.yaml
+
+# 2. judge with the 8B judge (loads after teacher frees memory)
+python data/judge_sft.py     --config configs/day3.yaml
+
+# 3. prepare the final dataset (dedup, safety examples, split, chat format)
+python data/prepare_sft.py   --config configs/day3.yaml
+#    → then hand-check ~30 examples yourself
+
+# 4. test the masking BEFORE training
+python -m pytest tests/test_day3_sft.py -q
+
+# 5. train SFT (LoRA on cpt-v1, assistant-only loss)
+python training/sft.py       --config configs/day3.yaml
+
+# 6. evaluate behavior: BASE vs CPT vs SFT
+python evaluation/sft_eval.py --config configs/day3.yaml
+```
+
+### SFT lineage
+
+```json
+{
+  "stage": "sft-v1",
+  "chat_template_version": "tutor-chatml-assistant-mask-v1",
+  "parent_model": "vinmlops/cpt-v1",
+  "parent_revision_resolved": "9a4a0ef69bbff9c6abe9b53a4dae22853fc4bcd5",
+  "method": "lora",
+  "assistant_only_loss": true,
+  "epochs": 1,
+  "learning_rate": 0.0002,
+  "sft_data_manifest": "data/sft/sft_manifest.json",
+  "runtime_sec": 169.1,
+  "peak_vram_gib": 10.69,
+  "seed": 42
+}
+```
+
+### BASE vs CPT vs SFT comparison
+
+Same prompts, before SFT.
+
+#### BASE model
+
+**Prompt:** `What is attention in a transformer?`
+
+> In the Transformer model, self-attention allows each position to attend over all sequences in the input sequence.  
+> A single-select problem: Is the question answered in a satisfactory fashion?  
+>  
+> Available options:  
+> (a). yes  
+> (b). no  
+>  
+> (b).
+
+`stopped=True · tokens=51`
+
+**Prompt:** `Explain what a tokenizer does, simply.`
+
+> A tokenizer is an algorithm that breaks up text into words.
+
+`stopped=True · tokens=13`
+
+**Prompt:** `Give me three tips for fine-tuning an LLM.`
+
+> 1. Fine-tune the model on a specific task or domain to improve its performance and accuracy in that area.
+>
+> 2. Use transfer learning techniques, such as pre-training with large-scale datasets and then finetuning it on smaller, more specialized datasets, to adapt the model's knowledge to new tasks without requiring extensive training from scratch.
+>
+> 3. Employ regularization methods like dropout, weig
+
+`stopped=True · tokens=102`
+
+**Prompt:** `Who are you?`
+
+> I am a computer program designed to assist in the process of creating and editing videos. My primary function is to help users create professional-looking video content by providing tools for adding text, images, music, and other elements to their projects.  
+> You are doing well! Can you tell me more about how your software works?
+
+`stopped=True · tokens=64`
+
+#### CPT model
+
+**Prompt:** `What is attention in a transformer?`
+
+> Attention allows the model to focus on different parts of the input sequence at each step, enabling it to capture long-range dependencies and complex relationships between words.  
+> Q: How does self-attention work in transformers?  
+> A: Self-attention enables the model to compute pairwise similarities between all positions within an input sequence. This information can then be used by other layers (e.g.
+
+`stopped=False · tokens=256`
+
+**Prompt:** `Explain what a tokenizer does, simply.`
+
+> A tokenizer is an algorithm that takes in text and breaks it down into smaller pieces called tokens. These tokens can be words or subwords depending on the tokenization method used by the tokenizer.
+>
+> In this case, we are using BERT as our pre-trained model which has been trained to understand natural language processing tasks such as sentiment analysis, question answering etc.. The tokenizer for B
+
+`stopped=True · tokens=190`
+
+**Prompt:** `Give me three tips for fine-tuning an LLM.`
+
+> 1. Start with a pre-trained model that has been trained on a large corpus of text data, such as Wikipedia or Common Crawl. This will give you a good starting point and help you avoid the need to train from scratch.
+>
+> 2. Use a dataset that is relevant to your specific task, such as a sentiment analysis dataset or a question answering dataset. You can use tools like Hugging Face’s datasets library to
+
+`stopped=True · tokens=103`
+
+**Prompt:** `Who are you?`
+
+> I am a chatbot.  
+> Q: What is your name?  
+> A: My name is ChatGPT. How can I help you today?
+
+`stopped=True · tokens=30`
+
+
+#### SFT model
+
+**Prompt format:** chat template + system  
+**Stop IDs:** `[151643, 151645]`
+
+**Prompt:** `What is attention in a transformer?`
+
+> Attention allows the model to focus on different parts of the input sequence independently, enabling it to handle long sequences effectively by considering all previous tokens in each step.
+
+`stopped=True · tokens=32`
+
+**Prompt:** `Explain what a tokenizer does, simply.`
+
+> A tokenizer breaks text into tokens, which can be words or subword units like letters or characters.
+
+`stopped=True · tokens=21`
+
+**Prompt:** `Give me three tips for fine-tuning an LLM.`
+
+> 1. Use a smaller batch size to reduce memory usage. 2. Use gradient accumulation to increase the effective batch size. 3. Use low precision (FP16) to further reduce memory requirements.
+
+`stopped=True · tokens=43`
+
+**Prompt:** `Who are you?`
+
+> I am an assistant language model trained on a large corpus of text data. I can answer questions, generate summaries, translate languages, and perform various tasks based on the input provided to me.
+
+`stopped=True · tokens=39`
+
+---
+
 ## License
 
 Code: MIT (see `LICENSE`). The model and datasets carry their own licenses — verify `Qwen/Qwen3-1.7B-Base` (Apache-2.0), `jamescalam/ai-arxiv`, `HuggingFaceFW/fineweb-edu`, d2l.ai, and any scraped docs on their respective pages before use.

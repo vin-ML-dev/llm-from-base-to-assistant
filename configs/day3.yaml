@@ -1,0 +1,79 @@
+# Day 3 configuration — SFT: instruction data + supervised fine-tuning.
+# Teacher (generate) = Qwen3-14B, Judge (validate) = Qwen3-8B, SFT = LoRA on cpt-v1.
+# Models load SEQUENTIALLY (generate -> unload -> judge) to fit ~44 GB.
+
+student:
+  # the model we fine-tune — your Day 2 output (domain-adapted base)
+  base: "vinmlops/cpt-v1"            # HF Hub checkpoint from Day 2 (or local artifacts/cpt-v1)
+  base_revision: "main"
+  dtype: "bfloat16"
+
+generation:
+  teacher_model: "Qwen/Qwen3-14B"    # strong teacher for grounded Q&A
+  teacher_revision: "main"           # pin to a commit for reproducibility
+  prompt_version: "sft-generation-v1"
+  target_pairs: 3800                 # generate ~3800 → ~3000 survive judging
+  chunk_chars: 2000                  # size of source-text chunk fed to the teacher
+  temperature: 0.7
+  top_p: 0.9
+  max_new_tokens: 512
+  disable_thinking: true             # Qwen3: strip the hidden reasoning block
+  # how many domain docs to draw source chunks from (train pool only)
+  max_source_docs: 800
+
+judge:
+  judge_model: "Qwen/Qwen3-8B"       # DIFFERENT model → less self-preference bias
+  judge_revision: "main"
+  temperature: 0.0                   # deterministic scoring
+  max_new_tokens: 256
+  disable_thinking: true
+  accept_threshold: 4                # keep pairs scoring >= this (1-5 scale)
+
+dataset:
+  seed: 42
+  val_frac: 0.05                     # ~150 val out of ~3000; rest is train
+  # a few hand-written safety/identity examples get appended (see prepare_sft.py)
+  include_safety_examples: true
+
+chat:
+  # Qwen ChatML end-of-turn token; training uses assistant-only loss.
+  eos_token: "<|im_end|>"
+  system_prompt: "You are a helpful LLM/ML tutor. Answer clearly and concisely, and say when you are unsure."
+
+train:
+  # LoRA SFT (small data → LoRA resists overfitting and preserves CPT gains)
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32                     # alpha = 2*r heuristic
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj","lm_head"]
+  # train embeddings + output head too — the CPT base has untrained ChatML
+  # token rows, so this is required for the model to learn to emit <|im_end|>
+  # (i.e. to STOP). Without it LoRA can't fix the frozen lm_head.
+  #lora_modules_to_save: ["embed_tokens", "lm_head"]
+  learning_rate: 2.0e-4              # LoRA uses a higher LR than full FT
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  num_epochs: 1                      # small data overfits fast; start at 1
+  per_device_batch_size: 4
+  grad_accum_steps: 4                # effective batch 16
+  max_seq_length: 1024
+  bf16: true
+  gradient_checkpointing: true
+  assistant_only_loss: true          # grade ONLY assistant tokens
+  logging_steps: 5
+  eval_steps: 20
+  save_steps: 40
+
+paths:
+  clean_dir: "data/clean"            # cleaned corpus from Day 2 (source for generation)
+  raw_pairs: "data/sft/raw_pairs.jsonl"        # generated, pre-judge
+  judged_pairs: "data/sft/judged_pairs.jsonl"  # after judging
+  sft_data: "data/sft/sft-data-v1"             # final train/val (HF dataset)
+  manifest: "data/sft/sft_manifest.json"
+  sft_output_dir: "artifacts/sft-v1"           # the LoRA adapter + tokenizer
+  eval_heldout_dir: "data/eval_heldout"
+  before_prompts: "docs/before_evidence.md"    # Day 1 prompts to re-run
