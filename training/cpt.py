@@ -206,7 +206,10 @@ def main():
 
     # --- load the model weights ---
     dtype = torch.bfloat16 if tcfg.get("bf16", True) else torch.float32
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
+    import inspect as _inspect
+    _params = set(_inspect.signature(AutoModelForCausalLM.from_pretrained).parameters)
+    _dtype_key = "dtype" if "dtype" in _params else "torch_dtype"
+    model = AutoModelForCausalLM.from_pretrained(model_id, **{_dtype_key: dtype})
 
     # --- generate BASE answers first (before any training) ---
     comp = cfg.get("comparison", {})

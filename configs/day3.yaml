@@ -1,79 +1,106 @@
 # Day 3 configuration — SFT: instruction data + supervised fine-tuning.
-# Teacher (generate) = Qwen3-14B, Judge (validate) = Qwen3-8B, SFT = LoRA on cpt-v1.
-# Models load SEQUENTIALLY (generate -> unload -> judge) to fit ~44 GB.
+# Teacher = Qwen3-14B, judge = Qwen3-8B, student = LoRA on cpt-v2.
+# Run generation, judging, and training in separate processes to release GPU memory.
+# Actual memory requirements depend on the installed runtime and input lengths.
+#
+# Configuration for the corrected pipeline. The existing Python scripts still
+# need updates to honor paths.train_pool, generation limits, source-group splitting,
+# grounding checks, checkpoint settings, and an empty lora_modules_to_save list.
+# Resolve each model revision once, BEFORE loading model/tokenizer, and save the
+# immutable commit in the run manifest. Do not silently fall back if resolution fails.
 
 student:
-  # the model we fine-tune — your Day 2 output (domain-adapted base)
-  base: "vinmlops/cpt-v1"            # HF Hub checkpoint from Day 2 (or local artifacts/cpt-v1)
-  base_revision: "main"
+  # the model we fine-tune — your Day 2 output (domain-adapted base, clean run)
+  base: "vinmlops/cpt-v2"
+  base_revision: "main"             # resolve once at run start, or supply a commit SHA
   dtype: "bfloat16"
 
 generation:
   teacher_model: "Qwen/Qwen3-14B"    # strong teacher for grounded Q&A
-  teacher_revision: "main"           # pin to a commit for reproducibility
-  prompt_version: "sft-generation-v1"
-  target_pairs: 3800                 # generate ~3800 → ~3000 survive judging
+  teacher_revision: "main"           # resolve once at run start, or supply a commit SHA
+  prompt_version: "sft-generation-v2"
+  target_pairs: 6000                 # valid domain pairs BEFORE judging/deduplication
+  target_general_pairs: 1000         # valid general pairs from retained training replay
   chunk_chars: 2000                  # size of source-text chunk fed to the teacher
   temperature: 0.7
   top_p: 0.9
   max_new_tokens: 512
-  disable_thinking: true             # Qwen3: strip the hidden reasoning block
-  # how many domain docs to draw source chunks from (train pool only)
-  max_source_docs: 800
+  disable_thinking: true             # apply_chat_template(enable_thinking=False); fail on error
+  oversample: 1.4                    # initial candidate budget, not a guarantee of accepted pairs
+  max_chunks_per_doc: 6              # diversity cap; keep source-document identity for splitting
+  max_source_docs: 0                 # 0 = all eligible DOMAIN documents in paths.train_pool
+  # An 800-document cap at six chunks/doc cannot supply 6000 domain candidates.
+  # General candidates also come exclusively from paths.train_pool (kind=replay).
+  # Use dataset.seed for source selection AND the teacher's sampling seed.
 
 judge:
-  judge_model: "Qwen/Qwen3-8B"       # DIFFERENT model → less self-preference bias
-  judge_revision: "main"
-  temperature: 0.0                   # deterministic scoring
+  judge_model: "Qwen/Qwen3-8B"       # separate judge checkpoint; errors can still be correlated
+  judge_revision: "main"             # resolve once at run start, or supply a commit SHA
+  temperature: 0.0                   # greedy scoring; not a guarantee of cross-runtime determinism
   max_new_tokens: 256
   disable_thinking: true
   accept_threshold: 4                # keep pairs scoring >= this (1-5 scale)
+  require_source_grounding: true     # judge receives the original source chunk with the Q&A
+  # Reject/retry invalid scores rather than coercing arbitrary values to integers.
 
 dataset:
   seed: 42
-  val_frac: 0.05                     # ~150 val out of ~3000; rest is train
-  # a few hand-written safety/identity examples get appended (see prepare_sft.py)
+  val_frac: 0.05                     # about 350 of 7000 if all survive; grouping makes it approximate
+  split_by: "source_document"        # all chunks/questions from one source stay in the same split
+  # Preserve source IDs/hashes/URLs/licenses. Group known duplicate sources too.
+  # Add manual examples to training only, after checking overlap with validation.
   include_safety_examples: true
 
 chat:
   # Qwen ChatML end-of-turn token; training uses assistant-only loss.
   eos_token: "<|im_end|>"
-  system_prompt: "You are a helpful LLM/ML tutor. Answer clearly and concisely, and say when you are unsure."
+  system_prompt: "You are a helpful assistant with expertise in machine learning and large language models. Answer the user's question accurately and directly. Explain concepts clearly and acknowledge uncertainty when you are unsure."
 
 train:
-  # LoRA SFT (small data → LoRA resists overfitting and preserves CPT gains)
+  # Start with one epoch of LoRA; measure validation quality and general retention.
   use_lora: true
   lora_r: 16
   lora_alpha: 32                     # alpha = 2*r heuristic
   lora_dropout: 0.05
   lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj","lm_head"]
-  # train embeddings + output head too — the CPT base has untrained ChatML
-  # token rows, so this is required for the model to learn to emit <|im_end|>
-  # (i.e. to STOP). Without it LoRA can't fix the frozen lm_head.
-  #lora_modules_to_save: ["embed_tokens", "lm_head"]
+                        "gate_proj", "up_proj", "down_proj"]
+  # Freeze full embedding/output matrices initially; train the listed LoRA modules.
+  # The trainer MUST honor [] (the old `value or [embed_tokens, lm_head]` does not).
+  # Supervise the assistant's terminating <|im_end|> and save/reload the EOS config.
+  # Investigate stopping with real labels before opting into full matrix training.
+  lora_modules_to_save: []
   learning_rate: 2.0e-4              # LoRA uses a higher LR than full FT
   lr_scheduler_type: "cosine"
   warmup_ratio: 0.03
   weight_decay: 0.0
   max_grad_norm: 1.0
   num_epochs: 1                      # small data overfits fast; start at 1
-  per_device_batch_size: 4
-  grad_accum_steps: 4                # effective batch 16
-  max_seq_length: 1024
+  per_device_batch_size: 2
+  per_device_eval_batch_size: 2
+  grad_accum_steps: 8                # effective batch 16 on ONE GPU
+  max_seq_length: 2048               # validate complete formatted examples, including answer EOS
+  # This larger limit reduces truncation risk; it does not guarantee every pair fits.
   bf16: true
   gradient_checkpointing: true
   assistant_only_loss: true          # grade ONLY assistant tokens
   logging_steps: 5
+  eval_strategy: "steps"
   eval_steps: 20
+  save_strategy: "steps"
   save_steps: 40
+  save_total_limit: 1                # final adapter export is additional; allow room for the next save
+  save_only_model: false             # retain optimizer/scheduler/RNG state for training resumption
 
 paths:
-  clean_dir: "data/clean"            # cleaned corpus from Day 2 (source for generation)
-  raw_pairs: "data/sft/raw_pairs.jsonl"        # generated, pre-judge
+  clean_dir: "data/clean"            # source archives; do NOT generate directly from domain_*.jsonl
+  train_pool: "data/clean/pool_train.jsonl"  # ONLY source for domain and general generation
+  raw_pairs: "data/sft/raw_pairs.jsonl"        # generated domain pairs, pre-judge
+  raw_general_pairs: "data/sft/raw_general_pairs.jsonl"  # retained training replay only
   judged_pairs: "data/sft/judged_pairs.jsonl"  # after judging
-  sft_data: "data/sft/sft-data-v1"             # final train/val (HF dataset)
+  sft_data: "data/sft/sft-data-v2"             # final train/val (HF dataset)
   manifest: "data/sft/sft_manifest.json"
-  sft_output_dir: "artifacts/sft-v1"           # the LoRA adapter + tokenizer
+  sft_output_dir: "artifacts/sft-v2"           # the LoRA adapter + tokenizer
   eval_heldout_dir: "data/eval_heldout"
+  domain_eval: "data/eval_heldout/heldout.jsonl"         # protected; never a generation source
+  general_eval: "data/eval_heldout/general_eval.jsonl"  # protected; never a generation source
   before_prompts: "docs/before_evidence.md"    # Day 1 prompts to re-run

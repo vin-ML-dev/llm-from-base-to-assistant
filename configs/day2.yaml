@@ -1,56 +1,106 @@
 # Day 2 configuration — data pipeline + continued pretraining (CPT).
-# Conservative CPT of Qwen3-1.7B-Base on an LLM/ML corpus, targeting one A40 (~44GB).
+# Personal CPT of Qwen3-1.7B-Base on an LLM/NN/transformer corpus (~10M tokens),
+# targeting one 40-48GB GPU. Sources: Wikipedia + arXiv full papers + HF/PyTorch docs.
 
 model:
   id: "Qwen/Qwen3-1.7B-Base"
-  revision: "main"                     # cpt.py resolves this to an immutable HF commit at runtime
+  revision: "main"
   dtype: "bfloat16"
 
 data:
-  # ---- domain sources ----
+  # ---- 1. Wikipedia (NN/ML/transformer/LLM) — CC-BY-SA-4.0 ----
+  # Collected separately by collect_wiki.py from a curated topic list (no crawl).
+  # Run collect_wiki.py first, then collect.py --skip-wiki.
+  wiki_max_pages: 1500             # cap on articles (curated list is ~76)
+  wiki_min_chars: 800              # skip stub articles
+  wiki_request_delay_sec: 0.2      # be polite to the Wikipedia API
+
+  # ---- 2. arXiv full papers (LLM/Transformer/NN) — arXiv per-paper license ----
   arxiv_dataset: "jamescalam/ai-arxiv"
-  arxiv_max_docs: 400
+  arxiv_max_docs: 600              # bumped to carry more of the ~10M token target
+  arxiv_min_chars: 1500           # full papers, not stubs
+  arxiv_keywords:                  # keep only papers mentioning these in title/abstract
+    - "transformer"
+    - "attention"
+    - "language model"
+    - "large language model"
+    - "neural network"
+    - "deep learning"
+    - "fine-tuning"
+    - "pretraining"
+    - "self-supervised"
+    - "sequence"
 
-  doc_seed_urls:
-    - "https://huggingface.co/docs/transformers/index"
-    - "https://huggingface.co/docs/peft/index"
-    - "https://huggingface.co/docs/trl/index"
-    - "https://pytorch.org/docs/stable/index.html"
-  doc_max_pages: 150
-  doc_request_delay_sec: 0.5
+  # ---- 3. HF + PyTorch docs SOURCE .md from GitHub — Apache-2.0 / BSD ----
+  doc_github_sources:
+    - repo: "huggingface/transformers"
+      path: "docs/source/en"
+      license: "Apache-2.0"
+    - repo: "huggingface/peft"
+      path: "docs/source"
+      license: "Apache-2.0"
+    - repo: "huggingface/trl"
+      path: "docs/source"
+      license: "Apache-2.0"
+    - repo: "pytorch/pytorch"
+      path: "docs/source"
+      license: "BSD-3-Clause"
+    # Hugging Face LLM Course (clean Markdown, on-topic tutorials) — Apache-2.0
+    - repo: "huggingface/course"
+      path: "chapters/en"
+      license: "Apache-2.0"
+    # Dive into Deep Learning (d2l) — textbook-grade domain chapters — CC-BY-SA-4.0
+    - repo: "d2l-ai/d2l-en"
+      path: "chapter_attention-mechanisms-and-transformers"
+      license: "CC-BY-SA-4.0"
+    - repo: "d2l-ai/d2l-en"
+      path: "chapter_recurrent-neural-networks"
+      license: "CC-BY-SA-4.0"
+    - repo: "d2l-ai/d2l-en"
+      path: "chapter_recurrent-modern"
+      license: "CC-BY-SA-4.0"
+    - repo: "d2l-ai/d2l-en"
+      path: "chapter_natural-language-processing-pretraining"
+      license: "CC-BY-SA-4.0"
+    - repo: "d2l-ai/d2l-en"
+      path: "chapter_natural-language-processing-applications"
+      license: "CC-BY-SA-4.0"
+    - repo: "d2l-ai/d2l-en"
+      path: "chapter_optimization"
+      license: "CC-BY-SA-4.0"
+    - repo: "d2l-ai/d2l-en"
+      path: "chapter_multilayer-perceptrons"
+      license: "CC-BY-SA-4.0"
+    - repo: "d2l-ai/d2l-en"
+      path: "chapter_builders-guide"
+      license: "CC-BY-SA-4.0"
+  doc_extensions: [".md", ".mdx", ".rst"]  # include reStructuredText (PyTorch docs)
+  doc_max_files: 1500              # raised: more repos now (HF course + d2l chapters)
+  doc_max_files_per_repo: 300      # per-repo cap so early repos dont starve later ones (d2l, HF course)
+  doc_min_chars: 400
+  doc_request_delay_sec: 0.1
 
-  theory_seed_urls:
-    - "https://huggingface.co/blog"
-    - "https://huggingface.co/learn/llm-course/en/chapter1/1"
-  theory_max_pages: 120
-
-  d2l_github_raw: "https://raw.githubusercontent.com/d2l-ai/d2l-en/master"
-  d2l_chapters:
-    - "chapter_attention-mechanisms-and-transformers"
-    - "chapter_recurrent-neural-networks"
-    - "chapter_recurrent-modern"
-    - "chapter_multilayer-perceptrons"
-    - "chapter_optimization"
-    - "chapter_linear-regression"
-    - "chapter_natural-language-processing-pretraining"
-
-  arxiv_survey_query: "large language models survey"
-  arxiv_survey_max: 40
-
-  # ---- general replay / anti-forgetting ----
+  # ---- 4/5. general replay + held-out eval (training health, not domain) ----
   replay_dataset: "HuggingFaceFW/fineweb-edu"
   replay_subset: "sample-10BT"
   replay_max_docs: 800
   replay_ratio: 0.15
+  replay_license: "ODC-BY-1.0 (FineWeb-Edu)"
+
+  # ---- cleaning / dedup ----
+  min_doc_chars: 300
+  max_garbage_ratio: 0.30          # drop docs >30% non-readable chars after unicode-normalization (PDF math garbage)
+  near_dup_threshold: 0.8          # Jaccard cutoff for near-duplicate removal
+  minhash_perm: 128                # MinHash permutations (accuracy vs speed)
+  shingle_k: 5                     # word k-shingle size for fingerprinting
 
   eval_heldout_frac: 0.10
   val_frac: 0.05
-  min_doc_chars: 300
   seed: 42
 
 tokenize:
-  block_size: 1024
-  token_budget: 3_000_000
+  block_size: 2048                 # context window used for CPT (Qwen3 supports far more)
+  token_budget: 12_000_000         # raised toward ~10M+ usable tokens
 
 paths:
   raw_dir: "data/raw"
@@ -61,8 +111,7 @@ paths:
   cpt_output_dir: "artifacts/cpt-v1"
 
 train:
-  # LoRA is intentionally used for this small CPT run. The final adapter is merged
-  # into the BASE weights, so artifacts/cpt-v1 is still a normal standalone model.
+  # Full fine-tuning for CPT (per your plan). LoRA fields kept for reference.
   method: "full"
   lora_r: 16
   lora_alpha: 32
@@ -70,15 +119,14 @@ train:
   lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"]
 
-  # More conservative than the previous 2e-4 setting because the corpus is only ~3M tokens.
   learning_rate: 1.0e-4
   lr_scheduler_type: "cosine"
   warmup_ratio: 0.05
   weight_decay: 0.01
   max_grad_norm: 1.0
 
-  per_device_batch_size: 4
-  grad_accum_steps: 8                  # effective batch = 32 x 1024-token blocks
+  per_device_batch_size: 2         # halved for 2048-token blocks (2x memory vs 1024)
+  grad_accum_steps: 16             # keep effective batch ~32 blocks
   num_epochs: 1
   bf16: true
   gradient_checkpointing: true
@@ -87,13 +135,10 @@ train:
   save_steps: 25
   eval_steps: 20
 
-  # Safety checks added after the broken run.
-  clean_output_dir: true               # prevents stale broken tokenizer/adapter files surviving a rerun
-  require_eos_in_packed: true          # abort CPT if the packed stream has no EOS/document boundaries
+  clean_output_dir: true
+  require_eos_in_packed: true
 
 comparison:
-  # BASE is generated before training; CPT is generated after merge, using exactly
-  # the same tokenizer, raw prompts, greedy decoding, and token limit.
   max_new_tokens: 128
   prompts:
     - "What is attention in a transformer?"
@@ -105,3 +150,6 @@ evaluation:
   domain_ppl_docs: 50
   general_ppl_docs: 50
   max_ppl_tokens: 100_000
+  # held-out eval texts (never trained on): produced by split.py / collect.py
+  domain_file: "data/eval_heldout/heldout.jsonl"
+  general_file: "data/eval_heldout/general_eval.jsonl"

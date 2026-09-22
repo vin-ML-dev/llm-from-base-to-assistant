@@ -29,7 +29,7 @@ def test_hash_normalizes():
 def test_day2_config_parses():
     import yaml
     cfg = yaml.safe_load((ROOT / "configs" / "day2.yaml").read_text())
-    assert cfg["tokenize"]["block_size"] == 1024
+    assert cfg["tokenize"]["block_size"] == 2048
     assert 0 < cfg["data"]["replay_ratio"] < 1
     assert cfg["model"]["id"].endswith("-Base")
 
@@ -72,11 +72,13 @@ def test_cpt_collator_labels_equal_input_ids():
         assert out["labels"][0][pos].item() == eos_id, "EOS must be a real, trained label"
 
 
-def test_cpt_config_defaults_to_lora():
-    """Regression test: CPT must default to LoRA (catastrophic-forgetting guard)
-    after the full-FT run damaged the base model's general capability."""
+def test_cpt_config_uses_full_ft():
+    """CPT uses FULL fine-tuning (train.method: full) for this run. The corpus
+    is small and full-FT gives the strongest domain adaptation; the ~15% replay
+    slice is the catastrophic-forgetting guard instead of LoRA."""
     import yaml
     from pathlib import Path
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs" / "day2.yaml").read_text())
-    assert cfg["train"]["use_lora"] is True
-    assert "lora_r" in cfg["train"] and "lora_target_modules" in cfg["train"]
+    assert cfg["train"]["method"] == "full"
+    # replay ratio must be present as the forgetting guard for full-FT
+    assert 0 < cfg["data"]["replay_ratio"] < 1

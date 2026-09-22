@@ -1,6 +1,6 @@
-"""Step 4 — SFT training (LoRA on cpt-v1, assistant-only loss).
+"""Step 4 — SFT training (LoRA on cpt-v2, assistant-only loss).
 
-Trains a LoRA adapter on top of the Day 2 cpt-v1 with TRL's SFTTrainer using
+Trains a LoRA adapter on top of the Day 2 cpt-v2 with TRL's SFTTrainer using
 assistant_only_loss=True (loss on assistant tokens only). The assistant turn's
 <|im_end|> is inside the trained span, so the model learns to STOP. Saves the
 adapter + tokenizer + lineage.
@@ -34,7 +34,9 @@ TUTOR_CHAT_TEMPLATE = (
 
 
 def check_dataset(dataset, tokenizer, max_length, split):
-    """Validate messages and confirm assistant targets survive truncation."""
+    """Validate complete examples and supervision of every assistant end token."""
+    if max_length <= 0:
+        raise ValueError("max_seq_length must be positive.")
     if "messages" not in dataset.column_names:
         raise ValueError(f"{split}: dataset needs a raw 'messages' column.")
     if not len(dataset):
@@ -56,13 +58,27 @@ def check_dataset(dataset, tokenizer, max_length, split):
             msgs, tokenize=True, add_generation_prompt=False,
             return_dict=True, return_assistant_tokens_mask=True,
         )
+        ids = enc["input_ids"]
         mask = enc.get("assistant_masks", [])
-        if not any(mask[:max_length]):
-            bad.append((i, "truncation removes all assistant targets"))
+        if len(ids) > max_length:
+            bad.append((i, f"formatted example has {len(ids)} tokens, exceeding {max_length}"))
+            continue
+        if len(mask) != len(ids) or not any(mask):
+            bad.append((i, "missing or invalid assistant token mask"))
+            continue
+        supervised_eos = sum(
+            token == tokenizer.eos_token_id and bool(active)
+            for token, active in zip(ids, mask)
+        )
+        assistant_turns = sum(m["role"] == "assistant" for m in msgs)
+        if supervised_eos != assistant_turns:
+            bad.append((i, "not every assistant turn has a supervised end token"))
+        if not any(active and token != tokenizer.eos_token_id for token, active in zip(ids, mask)):
+            bad.append((i, "assistant mask contains no answer tokens"))
 
     if bad:
         raise ValueError(f"{split}: {len(bad)} invalid examples (first 10: {bad[:10]}).")
-    print(f"{split}: all {len(dataset)} examples keep assistant targets.")
+    print(f"{split}: all {len(dataset)} examples fit and supervise assistant end tokens.")
     return dataset.select_columns(["messages"])
 
 
@@ -80,7 +96,7 @@ def main():
     from trl import SFTConfig, SFTTrainer
 
     base = cfg["student"]["base"]
-    rev = cfg["student"]["base_revision"]
+    rev = resolve_revision(base, cfg["student"]["base_revision"])
     data = repo_root() / cfg["paths"]["sft_data"]
     train_ds = load_from_disk(str(data / "train"))
     val_ds = load_from_disk(str(data / "val"))
@@ -90,8 +106,17 @@ def main():
     tok = load_tokenizer(base, rev)
     eos = cfg["chat"]["eos_token"]
     vocab = tok.get_vocab()
-    if eos != "<|im_end|>" or eos not in vocab or "<|im_start|>" not in vocab:
-        raise ValueError("Tutor template requires ChatML tokens and eos_token='<|im_end|>'.")
+    missing = [t for t in ("<|im_start|>", "<|im_end|>") if t not in vocab]
+    if eos != "<|im_end|>" or missing:
+        raise ValueError(
+            "Tutor template requires ChatML tokens and eos_token='<|im_end|>'.\n"
+            f"  eos_token in config: {eos!r}\n"
+            f"  missing from {base} vocab: {missing or 'none'}\n"
+            "If the ChatML tokens are missing, the base model's tokenizer doesn't "
+            "include them. Use a base whose tokenizer has <|im_start|>/<|im_end|> "
+            "(Qwen3 tokenizers normally do), or add them to the tokenizer BEFORE "
+            "CPT so their embeddings are trained — do not add them here."
+        )
     tok.eos_token = eos
     if tok.pad_token_id is None:
         tok.pad_token = eos
@@ -116,15 +141,14 @@ def main():
     if tcfg["gradient_checkpointing"]:
         model.config.use_cache = False
 
-    # modules_to_save: fully train the embeddings + output head. Critical here
-    # because the student is a CPT *base* model that has never emitted ChatML
-    # tokens — without this, the frozen lm_head row for <|im_end|> stays noise,
-    # so the model can't learn to STOP and emits junk tokens at end-of-turn.
-    modules_to_save = tcfg.get("lora_modules_to_save") or ["embed_tokens", "lm_head"]
+    # Respect []: train only the configured LoRA modules unless full modules
+    # are explicitly requested.
+    modules_to_save = tcfg.get("lora_modules_to_save", [])
     lora = LoraConfig(
         r=tcfg["lora_r"], lora_alpha=tcfg["lora_alpha"], lora_dropout=tcfg["lora_dropout"],
         target_modules=tcfg["lora_target_modules"],
         modules_to_save=modules_to_save,
+        revision=rev,
         task_type="CAUSAL_LM",
     ) if tcfg["use_lora"] else None
 
@@ -137,6 +161,7 @@ def main():
         output_dir=str(out_dir),
         num_train_epochs=tcfg["num_epochs"],
         per_device_train_batch_size=tcfg["per_device_batch_size"],
+        per_device_eval_batch_size=tcfg.get("per_device_eval_batch_size", 8),
         gradient_accumulation_steps=tcfg["grad_accum_steps"],
         learning_rate=float(tcfg["learning_rate"]),
         weight_decay=tcfg["weight_decay"],
@@ -144,22 +169,31 @@ def main():
         bf16=tcfg["bf16"],
         logging_steps=tcfg["logging_steps"],
         save_steps=tcfg["save_steps"],
-        save_total_limit=1,
+        save_strategy=tcfg.get("save_strategy", "steps"),
+        save_total_limit=tcfg.get("save_total_limit", 1),
+        save_only_model=tcfg.get("save_only_model", False),
         seed=cfg["dataset"]["seed"],
         report_to="none",
     )
-    # add version-dependent keys only if this TRL supports them
-    optional = {
+    # Select supported parameter names without silently dropping settings.
+    length_key = next((k for k in ("max_length", "max_seq_length") if k in sc_params), None)
+    eval_key = next((k for k in ("eval_strategy", "evaluation_strategy") if k in sc_params), None)
+    if length_key is None or eval_key is None:
+        raise RuntimeError("Installed TRL lacks the required sequence-length or evaluation settings.")
+    sc_kwargs.update({
         "lr_scheduler_type": tcfg["lr_scheduler_type"],
         "warmup_ratio": tcfg["warmup_ratio"],
-        "max_seq_length": tcfg["max_seq_length"],
-        "max_length": tcfg["max_seq_length"],
+        length_key: max_length,
         "gradient_checkpointing": tcfg["gradient_checkpointing"],
         "assistant_only_loss": tcfg["assistant_only_loss"],
-        "eval_strategy": "steps",
+        eval_key: tcfg.get("eval_strategy", "steps"),
         "eval_steps": tcfg["eval_steps"],
-    }
-    sc_kwargs.update({k: v for k, v in optional.items() if k in sc_params})
+    })
+    if "eos_token" in sc_params:
+        sc_kwargs["eos_token"] = eos
+    unsupported = set(sc_kwargs) - sc_params
+    if unsupported:
+        raise RuntimeError(f"Installed TRL does not support configured settings: {sorted(unsupported)}")
     sft_config = SFTConfig(**sc_kwargs)
 
     trainer = SFTTrainer(
@@ -175,13 +209,19 @@ def main():
 
     trainer.save_model(str(out_dir))
     tok.save_pretrained(str(out_dir))
+    # Adapter exports do not automatically save the base generation config.
+    # Adapter inference must explicitly load this saved GenerationConfig.
+    if trainer.model.generation_config is not None:
+        trainer.model.generation_config.save_pretrained(str(out_dir))
 
     peak = (torch.cuda.max_memory_allocated() / 1024**3) if torch.cuda.is_available() else None
     lineage = {
-        "stage": "sft-v1",
+        "stage": "sft-v2",
         "chat_template_version": "tutor-chatml-assistant-mask-v1",
         "parent_model": base,
-        "parent_revision_resolved": resolve_revision(base, rev),
+        "parent_revision_resolved": rev,
+        "eos_token_id": tok.eos_token_id,
+        "pad_token_id": tok.pad_token_id,
         "method": "lora" if tcfg["use_lora"] else "full",
         "assistant_only_loss": tcfg["assistant_only_loss"],
         "epochs": tcfg["num_epochs"],
@@ -191,8 +231,8 @@ def main():
         "peak_vram_gib": round(peak, 2) if peak else None,
         "seed": cfg["dataset"]["seed"],
     }
-    (out_dir / "lineage.json").write_text(json.dumps(lineage, indent=2))
-    print(f"\nSaved sft-v1 → {out_dir}  ({runtime/60:.1f} min, peak {lineage['peak_vram_gib']} GiB)")
+    (out_dir / "lineage.json").write_text(json.dumps(lineage, indent=2), encoding="utf-8")
+    print(f"\nSaved sft-v2 → {out_dir}  ({runtime/60:.1f} min, peak {lineage['peak_vram_gib']} GiB)")
     print("Next: python evaluation/sft_eval.py --config configs/day3.yaml")
 
 

@@ -15,7 +15,7 @@ def repo_root() -> Path:
 
 
 def load_config(path: str = "configs/day3.yaml") -> dict:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -27,7 +27,7 @@ def write_jsonl(path, rows) -> int:
     p = _resolve(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     n = 0
-    with open(p, "w") as f:
+    with open(p, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
             n += 1
@@ -35,7 +35,7 @@ def write_jsonl(path, rows) -> int:
 
 
 def read_jsonl(path):
-    with open(_resolve(path)) as f:
+    with open(_resolve(path), encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -66,12 +66,18 @@ def free_gpu():
 
 
 def resolve_revision(repo_id: str, revision: str) -> str:
-    """Turn a moving pointer like 'main' into an immutable commit hash."""
+    """Resolve a Hub revision to a commit hash; never silently return 'main'."""
     try:
         from huggingface_hub import HfApi
-        return HfApi().model_info(repo_id, revision=revision).sha
-    except Exception:
-        return revision
+        sha = HfApi().model_info(repo_id, revision=revision).sha
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not resolve {repo_id!r} revision {revision!r}. "
+            "Check repository access, connectivity, and huggingface_hub installation."
+        ) from exc
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+        raise RuntimeError(f"No valid commit hash returned for {repo_id!r} revision {revision!r}.")
+    return sha
 
 
 def load_tokenizer(source, revision=None):
@@ -115,11 +121,18 @@ def clean_text(s: str) -> str:
 
 
 def extract_json(text: str) -> dict | None:
-    """Pull the first {...} object out of a model response, or None."""
-    try:
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end == -1:
-            return None
-        return json.loads(text[start:end + 1])
-    except Exception:
+    """Decode the first valid JSON object, tolerating fences or surrounding prose.
+
+    Question/answer fields and judge score ranges are validated by the caller.
+    """
+    if not isinstance(text, str):
         return None
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            obj, _ = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None

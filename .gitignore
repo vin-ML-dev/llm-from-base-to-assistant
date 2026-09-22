@@ -26,3 +26,21 @@ data/**/*.txt
 
 # OS junk
 .DS_Store
+
+# secrets
+.env
+*.key
+*_token*
+
+# data & model artifacts (large, and personal-use-only)
+data/
+artifacts/
+*.jsonl
+*.safetensors
+*.bin
+
+# caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/

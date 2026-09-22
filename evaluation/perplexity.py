@@ -112,14 +112,17 @@ def main():
     block_size = int(cfg["tokenize"]["block_size"])
     max_tokens = int(eval_cfg["max_ppl_tokens"])
 
-    # held-out texts (never trained on) so the comparison is honest
-    #domain_texts = load_texts(f"{cfg['paths']['eval_heldout_dir']}/heldout.jsonl", cfg["evaluation"]["domain_ppl_docs"])
-    #general_texts = load_texts(f"{cfg['paths']['eval_heldout_dir']}/general_eval.jsonl", cfg["evaluation"]["general_ppl_docs"])
-    domain_texts = read_jsonl(eval_cfg["domain_file"], eval_cfg["domain_ppl_docs"])
-    general_texts = read_jsonl(eval_cfg["general_file"], eval_cfg["general_ppl_docs"])
+    # held-out texts (never trained on) so the comparison is honest.
+    # Prefer explicit config paths; fall back to the standard held-out files
+    # produced by split.py (domain) and collect.py (general_eval).
+    heldout_dir = cfg["paths"]["eval_heldout_dir"]
+    domain_path = eval_cfg.get("domain_file", f"{heldout_dir}/heldout.jsonl")
+    general_path = eval_cfg.get("general_file", f"{heldout_dir}/general_eval.jsonl")
+    domain_texts = read_jsonl(domain_path, eval_cfg["domain_ppl_docs"])
+    general_texts = read_jsonl(general_path, eval_cfg["general_ppl_docs"])
 
     if not domain_texts or not general_texts:
-        print("Missing eval texts. Check eval.domain_file and eval.general_file exist.")
+        print(f"Missing eval texts. Checked:\n  domain : {domain_path}\n  general: {general_path}")
         return
 
     base_model = cfg["model"]["id"]
