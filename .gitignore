@@ -15,14 +15,7 @@ checkpoints/
 wandb/
 mlruns/
 
-# Heavy data (keep the eval-set guard README, ignore the actual data)
-data/raw/
-data/clean/
-data/packed/
-data/**/*.jsonl
-data/**/*.parquet
-data/**/*.txt
-!data/eval_heldout/README.md
+
 
 # OS junk
 .DS_Store
@@ -33,7 +26,6 @@ data/**/*.txt
 *_token*
 
 # data & model artifacts (large, and personal-use-only)
-data/
 artifacts/
 *.jsonl
 *.safetensors
