@@ -69,6 +69,14 @@ train:
   # Supervise the assistant's terminating <|im_end|> and save/reload the EOS config.
   # Investigate stopping with real labels before opting into full matrix training.
   lora_modules_to_save: []
+  # STOP FIX: with the matrices frozen, the <|im_end|> row stays at cpt-v2's
+  # UNTRAINED values (the bug in the first sft-v2: P(<|im_end|>) = 0.006).
+  # Train ONLY these two embedding rows (PEFT trainable_token_indices, peft>=0.15).
+  lora_trainable_tokens: ["<|im_start|>", "<|im_end|>"]
+  # After training, sft.py measures stopping on validation examples (adapter,
+  # then merged + reloaded from disk) and prints PASS/FAIL against these.
+  verify_min_p_im_end: 0.5           # mean P(<|im_end|>) right after a finished answer
+  verify_min_stop_rate: 0.8          # fraction of SAMPLED (temp 0.7) answers that stop
   learning_rate: 2.0e-4              # LoRA uses a higher LR than full FT
   lr_scheduler_type: "cosine"
   warmup_ratio: 0.03
@@ -99,7 +107,8 @@ paths:
   judged_pairs: "data/sft/judged_pairs.jsonl"  # after judging
   sft_data: "data/sft/sft-data-v2"             # final train/val (HF dataset)
   manifest: "data/sft/sft_manifest.json"
-  sft_output_dir: "artifacts/sft-v2"           # the LoRA adapter + tokenizer
+  sft_output_dir: "artifacts/sft-v2"           # the LoRA adapter + tokenizer (KEEP this)
+  sft_merged_dir: "artifacts/sft-v2-merged"    # merged standalone model, verified after reload
   eval_heldout_dir: "data/eval_heldout"
   domain_eval: "data/eval_heldout/heldout.jsonl"         # protected; never a generation source
   general_eval: "data/eval_heldout/general_eval.jsonl"  # protected; never a generation source

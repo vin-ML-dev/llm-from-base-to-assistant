@@ -82,6 +82,50 @@ def check_dataset(dataset, tokenizer, max_length, split):
     return dataset.select_columns(["messages"])
 
 
+def stop_metrics(model, tok, dataset, n_prob=32, n_sample=10, max_new_tokens=256):
+    """Measure whether the model actually STOPS (the bug greedy decoding hid).
+
+    - mean_p_im_end: P(<|im_end|>) right after a gold validation answer.
+    - sampled_stop_rate: fraction of temp-0.7 samples that end with <|im_end|>.
+    """
+    import torch
+    model.eval()
+    model.config.use_cache = True
+    im_end = tok.eos_token_id
+    rows = dataset.select(range(min(n_prob, len(dataset))))
+
+    def prompt_text(msgs):
+        return tok.apply_chat_template(msgs[:-1], tokenize=False, add_generation_prompt=True)
+
+    probs = []
+    for row in rows:
+        text = prompt_text(row["messages"]) + row["messages"][-1]["content"]
+        ids = tok(text, return_tensors="pt", add_special_tokens=False).to(model.device)
+        with torch.no_grad():
+            probs.append(model(**ids).logits[0, -1].float().softmax(-1)[im_end].item())
+
+    stops = 0
+    sample_rows = rows.select(range(min(n_sample, len(rows))))
+    for row in sample_rows:
+        ids = tok(prompt_text(row["messages"]), return_tensors="pt",
+                  add_special_tokens=False).to(model.device)
+        with torch.no_grad():
+            out = model.generate(**ids, max_new_tokens=max_new_tokens, do_sample=True,
+                                 temperature=0.7, top_p=0.9, eos_token_id=im_end,
+                                 pad_token_id=tok.pad_token_id)
+        stops += int(out[0, -1].item() == im_end)
+    return {"mean_p_im_end": round(sum(probs) / len(probs), 4),
+            "min_p_im_end": round(min(probs), 4),
+            "sampled_stop_rate": round(stops / len(sample_rows), 3)}
+
+
+def report_stop(label, metrics, tcfg):
+    ok = (metrics["mean_p_im_end"] >= tcfg.get("verify_min_p_im_end", 0.5)
+          and metrics["sampled_stop_rate"] >= tcfg.get("verify_min_stop_rate", 0.8))
+    print(f"[verify:{label}] {metrics} -> {'PASS' if ok else 'FAIL: model does not stop reliably'}")
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="configs/day3.yaml")
@@ -144,13 +188,29 @@ def main():
     # Respect []: train only the configured LoRA modules unless full modules
     # are explicitly requested.
     modules_to_save = tcfg.get("lora_modules_to_save", [])
-    lora = LoraConfig(
+    lora_kwargs = dict(
         r=tcfg["lora_r"], lora_alpha=tcfg["lora_alpha"], lora_dropout=tcfg["lora_dropout"],
         target_modules=tcfg["lora_target_modules"],
         modules_to_save=modules_to_save,
         revision=rev,
         task_type="CAUSAL_LM",
-    ) if tcfg["use_lora"] else None
+    )
+    # STOP FIX: train only the ChatML token rows. Frozen, <|im_end|> keeps the
+    # CPT base's untrained row and the model cannot learn to stop.
+    token_names = tcfg.get("lora_trainable_tokens") or []
+    if token_names and tcfg["use_lora"]:
+        if "trainable_token_indices" not in inspect.signature(LoraConfig.__init__).parameters:
+            raise RuntimeError("Installed PEFT lacks trainable_token_indices. "
+                               "Run: pip install -U 'peft>=0.15'")
+        if {"embed_tokens", "lm_head"} & set(modules_to_save):
+            raise ValueError("Use lora_trainable_tokens OR full embed/lm_head in "
+                             "lora_modules_to_save, not both.")
+        token_ids = [tok.convert_tokens_to_ids(t) for t in token_names]
+        if any(i is None or i == tok.unk_token_id for i in token_ids):
+            raise ValueError(f"Trainable tokens missing from vocab: {token_names}")
+        lora_kwargs["trainable_token_indices"] = token_ids
+        print(f"Trainable token rows: {dict(zip(token_names, token_ids))}")
+    lora = LoraConfig(**lora_kwargs) if tcfg["use_lora"] else None
 
     out_dir = repo_root() / cfg["paths"]["sft_output_dir"]
     sc_params = set(inspect.signature(SFTConfig.__init__).parameters)
@@ -214,6 +274,35 @@ def main():
     if trainer.model.generation_config is not None:
         trainer.model.generation_config.save_pretrained(str(out_dir))
 
+    # --- VERIFY STOPPING (greedy decoding hid this bug last time) -------------
+    verify = {"adapter": stop_metrics(trainer.model, tok, val_ds)}
+    adapter_ok = report_stop("adapter", verify["adapter"], tcfg)
+
+    # Merge, save, then RELOAD FROM DISK and re-verify. The first sft-v2 lost its
+    # stop-token training during merge/save, and only a reload test catches that.
+    merged_dir = cfg["paths"].get("sft_merged_dir")
+    merged_ok = None
+    if tcfg["use_lora"] and merged_dir:
+        merged_dir = repo_root() / merged_dir
+        merged = trainer.model.merge_and_unload()
+        merged.config.eos_token_id = tok.eos_token_id
+        merged.config.pad_token_id = tok.pad_token_id
+        if merged.generation_config is not None:
+            merged.generation_config.eos_token_id = tok.eos_token_id
+            merged.generation_config.pad_token_id = tok.pad_token_id
+        merged.save_pretrained(str(merged_dir))
+        tok.save_pretrained(str(merged_dir))
+        del merged, trainer
+        torch.cuda.empty_cache()
+        reloaded = AutoModelForCausalLM.from_pretrained(str(merged_dir), **{dtype_key: dt})
+        reloaded = reloaded.to("cuda" if torch.cuda.is_available() else "cpu")
+        verify["merged_reloaded"] = stop_metrics(reloaded, tok, val_ds)
+        merged_ok = report_stop("merged_reloaded", verify["merged_reloaded"], tcfg)
+        print(f"Saved merged model -> {merged_dir}")
+    if not adapter_ok or merged_ok is False:
+        print("WARNING: stopping verification FAILED. Do not upload or use for DPO; "
+              "inspect verify results in lineage.json.")
+
     peak = (torch.cuda.max_memory_allocated() / 1024**3) if torch.cuda.is_available() else None
     lineage = {
         "stage": "sft-v2",
@@ -230,6 +319,8 @@ def main():
         "runtime_sec": round(runtime, 1),
         "peak_vram_gib": round(peak, 2) if peak else None,
         "seed": cfg["dataset"]["seed"],
+        "trainable_tokens": tcfg.get("lora_trainable_tokens") or [],
+        "stop_verification": verify,
     }
     (out_dir / "lineage.json").write_text(json.dumps(lineage, indent=2), encoding="utf-8")
     print(f"\nSaved sft-v2 → {out_dir}  ({runtime/60:.1f} min, peak {lineage['peak_vram_gib']} GiB)")
