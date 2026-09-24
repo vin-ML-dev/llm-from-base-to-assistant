@@ -1,0 +1,103 @@
+# Day 4 (DPO PILOT) configuration — preference data + DPO on sft-v2.
+# Pilot first: small, measurable, manually inspected before scaling.
+# Strategy: on-policy sft-v2 candidates + SELECTIVE teacher improvement,
+# pairwise judge with both_bad/uncertain verdicts, verified-correctness focus.
+
+student:
+  # DPO trains on top of sft-v2 (the merged, instruction-tuned model).
+  sft_model: "vinmlops/sft-v2"      # merged standalone model (Day 3 output)
+  base_revision: "main"
+  dtype: "bfloat16"
+
+sampling:
+  # On-policy candidates from sft-v2 at VARIED temperatures, so the candidates
+  # expose the model's own real mistakes (not a strawman base model).
+  candidates_per_prompt: 4
+  temperatures: [0.3, 0.5, 0.7, 0.8]   # capped at 0.8 -- 1.7B degenerates at temp 1.0
+  top_p: 0.9
+  max_new_tokens: 400
+  num_prompts: 250                    # PILOT size (~80% domain, ~20% general)
+  general_frac: 0.20
+  seed: 42
+  dedup_threshold: 0.92               # drop near-identical candidates
+  prompts_per_doc: 3
+  window_chars: 250
+
+teacher:
+  # Teacher used SELECTIVELY: only to supply a better answer when sft-v2's own
+  # candidates are all weak. NOT treated as blanket gold; its answers are
+  # marked unverified unless independently checked.
+  teacher_model: "Qwen/Qwen3-14B"
+  teacher_revision: "main"
+  temperature: 0.3
+  top_p: 0.9
+  max_new_tokens: 400
+  disable_thinking: true
+  # only call the teacher when the best judged candidate scores below this
+  improve_threshold: 4                # 1-5 quick quality gate (see judge)
+
+judge:
+  judge_model: "Qwen/Qwen3-14B"       # trial this, then MANUALLY verify decisions
+  judge_revision: "main"
+  temperature: 0.0
+  max_new_tokens: 400              # room for JSON verdict even if some reasoning slips through
+  disable_thinking: true
+  # both-order judging: keep a pair only when the same underlying answer wins
+  # BOTH orders (consistency check, not a bias eliminator).
+  require_order_agreement: true
+  # verdict options include both_bad and uncertain so the better of two wrong
+  # answers is NOT auto-promoted to a chosen training example.
+  min_margin_reason: true             # require a meaningful reason, not just a letter
+
+dataset:
+  val_frac: 0.15                      # bigger val on a small pilot
+  min_length_ratio: 0.3               # token-based length-bias guard (hard band)
+  max_length_ratio: 3.0
+  drop_length_only_wins: true         # drop pairs where chosen wins ONLY on length
+  length_only_ratio: 1.8              # "much longer" = chosen >= 1.8x rejected tokens
+  # keep behavior-test CATEGORIES in training, but hold out the exact eval
+  # questions + their source docs (set in prepare step)
+
+chat:
+  # domain gets the ML-assistant system prompt; general gets NO system prompt
+  # (mirrors SFT policy exactly).
+  system_prompt: "You are a helpful assistant with expertise in machine learning and large language models. Answer the user's question accurately and directly. Explain concepts clearly and acknowledge uncertainty when you are unsure."
+
+train:
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"]
+  beta: 0.2                          # was 0.1; stronger anchor to sft-v2
+  learning_rate: 1.0e-5              # full run at 5e-5 over-optimized and broke stopping
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  num_epochs: 1
+  sft_loss_weight: 0.2              # SFT loss on chosen answers keeps <|im_end|> likely
+  #ld_alpha: 0.5                      # LD-DPO: down-weight extra length (chosen longer 63%)
+  per_device_batch_size: 2
+  grad_accum_steps: 8
+  max_length: 1024
+  max_prompt_length: 512
+  bf16: true
+  gradient_checkpointing: true
+  logging_steps: 5
+  eval_steps: 10
+  save_steps: 20
+  # dpo.py checks stopping (sft baseline, DPO adapter, merged+reloaded) -> PASS/FAIL
+  verify_min_p_im_end: 0.5           # mean P(<|im_end|>) right after a chosen answer
+  verify_min_stop_rate: 0.8          # fraction of SAMPLED (temp 0.7) answers that stop
+
+paths:
+  clean_dir: "data/clean"
+  general_dir: "data/general"
+  candidates: "data/dpo/candidates.jsonl"
+  judged_pairs: "data/dpo/judged_pairs.jsonl"
+  pref_data: "data/dpo/pref-data-pilot"
+  manifest: "data/dpo/dpo_manifest.json"
+  funnel: "data/dpo/funnel.json"                 # explicit stage-by-stage counts
+  inspect_sample: "data/dpo/inspect_sample.jsonl" # 50-100 pairs for manual review
+  dpo_output_dir: "artifacts/dpo-fine-tune"
+  eval_heldout_dir: "data/eval_heldout"
