@@ -1,22 +1,75 @@
 # llm-from-base-to-assistant
 
-Turning an open **base** language model into a helpful domain **chat assistant**, end to end:
+**An end-to-end post-training pipeline that turns an open base language model into a domain chat assistant: continued pretraining, supervised fine-tuning, preference optimization, and rigorous evaluation, on a single GPU.**
 
 ```
-BASE  →  CPT  →  SFT  →  DPO  →  honestly evaluated  →  served
+Qwen3-1.7B-Base ──CPT──▶ cpt-v2 ──SFT──▶ sft-v2 ──DPO──▶ dpo-v1
+   (text completer)       (domain-adapted)   (instruction-following)   (preference-tuned)
 ```
 
-- **Model:** `Qwen/Qwen3-1.7B-Base` (development mule: `Qwen/Qwen3-0.6B-Base`)
-- **Domain:** an **LLM/ML tutor** — the assistant learns to explain LLM/ML concepts from basics to advanced.
-- **Data:** LLM/ML papers (`jamescalam/ai-arxiv`) + HF/PyTorch docs + theory sources (HF blog, HF LLM Course, [d2l.ai](https://d2l.ai), arXiv surveys), with a [`FineWeb-Edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) slice for general replay.
-- **Stack:** PyTorch · Hugging Face Transformers · `datasets` · PEFT · TRL · vLLM
+| | |
+|---|---|
+| **Base model** | `Qwen/Qwen3-1.7B-Base` (pipeline prototyped on `Qwen/Qwen3-0.6B-Base`) |
+| **Domain** | Machine learning, neural networks and large language models |
+| **Stack** | PyTorch · Transformers · TRL · PEFT · vLLM · Datasets |
+| **Hardware** | One 48 GB GPU |
+| **Released models** | [`cpt-v2`](https://huggingface.co/vinmlops/cpt-v2) · [`sft-v2`](https://huggingface.co/vinmlops/sft-v2) · [`dpo-v1`](https://huggingface.co/vinmlops/dpo-v1) |
 
-This repo is built day by day alongside a theory guide. **Days 1–2 are complete:**
-Day 1 (setup + foundations) gets a pinned environment, confirms the base model runs,
-explores the concepts, and locks the eval set; Day 2 (data + continued pretraining)
-builds a versioned LLM/ML corpus and produces `cpt-v1`, a domain-adapted base model.
+---
 
-> The point of the project is not "I fine-tuned Qwen." It is being able to **explain, measure honestly, reproduce, and serve** every stage.
+## Highlights
+
+- **Domain adaptation that measurably works:** continued pretraining on ~5.2M curated tokens lowered held-out domain perplexity by **~14%** with ~3% general drift. An ablation confirms the gain comes from this stage.
+- **Synthetic instruction data with quality control:** teacher–judge generation, source-grouped leak-free splits, stratified validation.
+- **Root-caused a silent end-of-turn failure:** stop-token probability **0.006 → 0.91**, sampled stop rate **20% → 100%**, verified after merge and reload.
+- **Preference optimization with a hardened judge:** on-policy pairs, both-order consistency judging, five-verdict rubric, length-bias controls. dpo-v1 beats sft-v2 **13–1** in head-to-head evaluation.
+- **Evaluation built to be trusted:** locked test set, leakage audit, confidence intervals, ablations, failure analysis, auto-generated reproducibility report.
+
+---
+
+## Results
+
+### Model progression (unified evaluation, same held-out sets for every model)
+
+| Model | Domain perplexity ↓ | General perplexity ↓ | Stops cleanly |
+|---|---|---|---|
+| Qwen3-1.7B-Base | 7.04 | 10.58 | — (text completer) |
+| **cpt-v2** | **6.08** (−13.6%) | 10.91 (+3.1%) | — (text completer) |
+| **sft-v2** | 6.13 | 11.06 | **100%** |
+| **dpo-v1** | 6.13 | 11.08 | **100%** |
+| *Ablation: SFT without CPT* | *7.10* | *10.74* | *100%* |
+
+- **CPT supplies the domain knowledge; SFT and DPO preserve it.** SFT started directly from the base model shows no domain gain (7.10 vs 6.13).
+- **DPO leaves perplexity unchanged, as expected:** it changes which answer the model prefers, not what it knows.
+
+### Preference optimization (dpo-v1 vs sft-v2)
+
+| Metric | sft-v2 | dpo-v1 |
+|---|---|---|
+| Held-out preference accuracy (333 pairs) | 57.4% | **62.5%** |
+| Head-to-head LLM judge (both orders must agree) | 1 win | **13 wins** · 24 ties |
+| Sampled stop rate (temperature 0.7) | 100% | 99% |
+| Mean answer length | 37 tokens | 46 tokens |
+
+No regressions on identity, safety or general-knowledge prompts.
+
+### Data integrity
+
+| Check | Result |
+|---|---|
+| SFT records traced to locked test documents | **0** / 6,707 |
+| DPO prompts traced to locked test documents | **2** / 2,763 (0.1%) |
+
+---
+
+## Pipeline
+
+| Stage | What it does | Key details |
+|---|---|---|
+| **1. CPT** | Teaches the domain | ~5.2M cleaned tokens (85% domain, 15% general replay); deduplicated, leak-free splits; full fine-tuning |
+| **2. SFT** | Teaches the model to answer and stop | ~6.3K Q&A examples written by a teacher model and filtered by a separate judge; chat format; assistant-only loss |
+| **3. DPO** | Teaches it to prefer better answers | 2,219 preference pairs from the model's own answers, judged in both orders; LoRA, merged into a standalone model |
+| **4. Evaluation** | Checks every stage | Leakage audit, perplexity, behavior suite, stop verification, pairwise judging with confidence intervals, ablation |
 
 ---
 
@@ -24,270 +77,131 @@ builds a versioned LLM/ML corpus and produces `cpt-v1`, a domain-adapted base mo
 
 ```
 llm-from-base-to-assistant/
-├── configs/        # config-driven experiments (model, data, training)
-├── data/           # dataset building + the LOCKED held-out eval set
-│   └── eval_heldout/   # never used for CPT / SFT-gen / DPO prompts
-├── training/       # CPT / SFT / DPO training entrypoints (added Days 2–4)
-├── evaluation/     # eval suite + judge (added Day 5)
-├── serving/        # vLLM + Docker (added Day 6)
-├── scripts/        # Day 1 exploration + smoke-test scripts
-├── tests/          # unit tests (masking test added Day 3; smoke test Day 1)
-└── docs/           # decisions log, lineage, reproducibility, results
+├── configs/        # one config per stage (data, training, evaluation)
+├── data/           # collection, cleaning, splitting, SFT/DPO data builders
+│   └── eval_heldout/   # locked test sets, never used for training or generation
+├── training/       # cpt.py · sft.py · dpo.py · sft_from_base.py (ablation)
+├── evaluation/     # perplexity, behavior suite, pairwise judging, leakage audit,
+│                   # failure analysis, reproducibility report
+├── scripts/        # environment and model inspection utilities
+├── tests/          # masking, packing, judge-logic and statistics tests
+└── docs/           # results and reproducibility report
 ```
 
 ---
 
-## Day 1 — quick start
+## Quick start
 
 ```bash
-# 1. Create the environment (Qwen3 needs transformers >= 4.51, < 5.0)
-python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-# On managed images (RunPod) use the Day 2 notebook's install cell instead — it
-# reconciles preinstalled packages so the notebook and CLI share one Python env.
 
-# 2. Confirm the base model loads and runs; record measured VRAM + tokens/sec
-python scripts/smoke_test.py --config configs/day1.yaml
+# Stage 1 — continued pretraining
+python data/collect.py          --config configs/day2.yaml
+python data/clean.py            --config configs/day2.yaml
+python data/split.py            --config configs/day2.yaml
+python data/tokenize_pack.py    --config configs/day2.yaml
+python training/cpt.py          --config configs/day2.yaml
+python evaluation/perplexity.py --config configs/day2.yaml
 
-# 3. Explore the Day 1 concepts hands-on (safe, read-only)
-python scripts/explore_tokenizer.py   --config configs/day1.yaml
-python scripts/inspect_model.py       --config configs/day1.yaml
-python scripts/forward_pass_probs.py  --config configs/day1.yaml --prompt "The capital of France is"
-python scripts/base_vs_chat.py        --config configs/day1.yaml
-python scripts/generation_settings.py --config configs/day1.yaml --prompt "Explain what a tokenizer does."
+# Stage 2 — supervised fine-tuning
+python data/generate_sft.py     --config configs/day3.yaml
+python data/judge_sft.py        --config configs/day3.yaml
+python data/prepare_sft.py      --config configs/day3.yaml
+python training/sft.py          --config configs/day3.yaml
 
-# 4. Save your "before" evidence (base model failing to chat)
-python scripts/base_vs_chat.py --config configs/day1.yaml --save docs/before_evidence.md
+# Stage 3 — preference optimization
+python data/sample_candidates.py --config configs/day4.yaml
+python data/judge_pairs.py       --config configs/day4.yaml
+python data/prepare_dpo.py       --config configs/day4.yaml
+python training/dpo.py           --config configs/day4.yaml
 
-# 5. Lock the held-out eval location (creates the directory + a README guard)
-python scripts/lock_eval_set.py
+# Evaluation
+python evaluation/leakage_check.py        --config configs/day5.yaml
+python evaluation/eval_suite.py           --config configs/day5.yaml
+python evaluation/dpo_eval.py             --config configs/day4.yaml
+python training/sft_from_base.py          --config configs/day5.yaml   # ablation
+python evaluation/failure_analysis.py     --config configs/day5.yaml
+python evaluation/build_reproduce_doc.py  --config configs/day5.yaml
 ```
 
-Then fill in `docs/decisions.md` with your model + hardware decisions.
-
-### Day 1 checklist (maps to the theory guide)
-
-- [ ] Pinned environment installed
-- [ ] `smoke_test.py` prints measured peak VRAM + tokens/sec
-- [ ] Tokenizer explored (tokens, IDs, special tokens, two-tokenizer comparison)
-- [ ] `print(model)` reviewed; params counted per component
-- [ ] Top-10 next-token probabilities inspected
-- [ ] Base model behavior observed on the frozen prompts — it tends to *continue* text rather than answer as an assistant (save the actual outputs as before-evidence)
-- [ ] Generation settings (temp 0 / 0.7 / 1.2) compared
-- [ ] Held-out eval location locked
-- [ ] `docs/decisions.md` filled in
-- [ ] `pytest tests/test_environment.py` passes
+Generation and judging stages load the teacher and judge models sequentially, so peak memory fits a single 48 GB GPU.
 
 ---
 
-## Day 2 — quick start
+## Using the model
 
-Full fine-tuning CPT on an A40 (~44 GB). Sources: `jamescalam/ai-arxiv` papers +
-scraped HF/PyTorch docs + theory sources (HF blog, HF LLM Course, d2l.ai, arXiv
-surveys) + a FineWeb-Edu replay slice. All settings in `configs/day2.yaml`.
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-```bash
-python data/collect.py        --config configs/day2.yaml   # papers + docs + theory + replay
-python data/clean.py          --config configs/day2.yaml   # normalize, dedup
-python data/split.py          --config configs/day2.yaml   # doc-level split + leakage check
-python data/tokenize_pack.py  --config configs/day2.yaml   # 1024-block packing, 85/15 mix
-python training/cpt.py        --config configs/day2.yaml   # full fine-tune -> artifacts/cpt-v1
-python evaluation/perplexity.py --config configs/day2.yaml # BASE vs CPT, domain vs general
+tok = AutoTokenizer.from_pretrained("vinmlops/dpo-v1")
+model = AutoModelForCausalLM.from_pretrained("vinmlops/dpo-v1", dtype=torch.bfloat16).to("cuda")
+
+messages = [
+    {"role": "system", "content": "You are a helpful assistant with expertise in machine learning "
+                                  "and large language models. Answer the user's question accurately "
+                                  "and directly. Explain concepts clearly and acknowledge uncertainty "
+                                  "when you are unsure."},
+    {"role": "user", "content": "What is attention in a transformer?"},
+]
+inputs = tok(tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True),
+             return_tensors="pt", add_special_tokens=False).to(model.device)
+out = model.generate(**inputs, max_new_tokens=400, do_sample=False,
+                     eos_token_id=tok.convert_tokens_to_ids("<|im_end|>"))
+print(tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True))
 ```
 
-Or run `notebooks/day2_runner.ipynb` top-to-bottom on the rented GPU.
-
-> **RunPod-safe install** (baked into the notebook): `pip install -r requirements.txt
-> --ignore-installed blinker`, force `transformers>=4.51,<5.0`, and uninstall the
-> unused `torchaudio`. All script calls use `{sys.executable}` so they run under the
-> notebook kernel's Python.
+For general (non-ML) questions, omit the system message; this matches how the model was trained.
 
 ---
 
-## Day 2 — results
+## Known limitations
 
-1. **Perplexity (lower is better):** BASE → CPT: domain `7.54 → 6.76`, general `10.62 → 11.13`.
-2. **Domain:** `-10.3%` perplexity — evidence of domain specialization.
-3. **General:** `+4.8%` perplexity — a measurable forgetting signal.
-4. **Qualitative check:** on the same greedy-decoded prompts, CPT gives more domain-relevant explanations for attention and tokenization.
-5. **Instruction following:** prompts such as “Give me three tips for fine-tuning an LLM” still show continuation/repetition instead of reliable instruction following.
-6. **Expected behavior:** BASE and CPT are completion models, not chat-tuned assistants; repetition and weak stopping behavior at this stage are expected.
-7. **Day 2 conclusion:** `cpt-v1` improved domain modeling while preserving a clear reason for Day 3 SFT — instruction following, response structure, and stopping behavior.
+- **Concise responses.** Answers are accurate but brief (~40–60 tokens), a style inherited from the SFT data. Larger post-trained assistants give considerably more detailed explanations.
+- **Uncertainty handling.** The model can state unverifiable facts confidently instead of acknowledging uncertainty.
+- **Scale.** A 1.7B model with a modest corpus and preference set; not intended for production or critical use.
+- **Evaluation scope.** LLM-judge-based quality metrics on a 38-prompt behavior suite; standard benchmarks and human evaluation are not yet included.
 
 ---
 
+## Future improvements
 
-## Day 3 — SFT
+### Response quality
+- **Deeper, structured answers:** rebuild the SFT data with long-form explanations (definition, mechanism, example, pitfalls) for about 85% of examples, and concise answers for brevity requests.
+- **Adaptive length:** DPO pairs where the shorter answer wins when the user asks for brevity, so the model learns *when* to go deep.
+- **Instruction following:** examples with explicit format and length constraints ("in 3 bullets", "one sentence").
+- **Multi-turn conversations:** follow-up questions that build on earlier answers.
 
-### Quick start
+### Reliability
+- **Calibrated uncertainty:** explicit "not publicly known" examples in SFT and targeted DPO pairs (chosen = admits uncertainty, rejected = fabricated detail).
+- **Source-grounded verification:** judge generated answers against their source text, with human spot checks.
+- **Safety coverage:** a larger set of harmful requests (should refuse) and harmless-but-sensitive ones (should not refuse).
 
-```bash
-# 0. install (RunPod-safe) + restart kernel
-pip install -r requirements.txt --ignore-installed blinker
-pip install -U "transformers>=4.51,<5.0" "trl>=0.9.6" "peft>=0.12.0" "vllm>=0.5.4" torch
-pip uninstall -y torchaudio
+### Data
+- **Larger clean domain corpus:** 20–50M tokens, with paper text extracted from LaTeX source instead of PDFs.
+- **Broader sources:** more documentation, openly licensed textbooks and Q&A content.
+- **More varied prompts:** real questions (why, compare, step by step, debug) instead of passage summaries.
 
-# 1. generate Q&A with the 14B teacher (loads, runs, UNLOADS)
-python data/generate_sft.py  --config configs/day3.yaml
+### Training
+- **Longer sequences:** raise SFT and DPO length limits (≈4K tokens) so long answers are never truncated.
+- **Checkpoint selection:** save frequent checkpoints and keep the latest one that passes stop verification.
+- **Controlled experiments:** one-variable sweeps of learning rate, β and the SFT anchor; evaluate alternative preference methods (SimPO, KTO, ORPO).
+- **Longer context:** long-sequence training for document-level inputs.
 
-# 2. judge with the 8B judge (loads after teacher frees memory)
-python data/judge_sft.py     --config configs/day3.yaml
+### Evaluation
+- **Standard benchmarks** across all checkpoints.
+- **Independent judge** from a different model family, plus **blind human A/B ratings**.
+- **Larger held-out question set** (100–200 prompts) for tighter confidence intervals.
+- **Release gate:** quality, safety and stopping thresholds that must pass before a model is published.
 
-# 3. prepare the final dataset (dedup, safety examples, split, chat format)
-python data/prepare_sft.py   --config configs/day3.yaml
-#    → then hand-check ~30 examples yourself
-
-# 4. test the masking BEFORE training
-python -m pytest tests/test_day3_sft.py -q
-
-# 5. train SFT (LoRA on cpt-v1, assistant-only loss)
-python training/sft.py       --config configs/day3.yaml
-
-# 6. evaluate behavior: BASE vs CPT vs SFT
-python evaluation/sft_eval.py --config configs/day3.yaml
-```
-
-### SFT lineage
-
-```json
-{
-  "stage": "sft-v1",
-  "chat_template_version": "tutor-chatml-assistant-mask-v1",
-  "parent_model": "vinmlops/cpt-v1",
-  "parent_revision_resolved": "9a4a0ef69bbff9c6abe9b53a4dae22853fc4bcd5",
-  "method": "lora",
-  "assistant_only_loss": true,
-  "epochs": 1,
-  "learning_rate": 0.0002,
-  "sft_data_manifest": "data/sft/sft_manifest.json",
-  "runtime_sec": 169.1,
-  "peak_vram_gib": 10.69,
-  "seed": 42
-}
-```
-
-### BASE vs CPT vs SFT comparison
-
-Same prompts, before SFT.
-
-#### BASE model
-
-**Prompt:** `What is attention in a transformer?`
-
-> In the Transformer model, self-attention allows each position to attend over all sequences in the input sequence.  
-> A single-select problem: Is the question answered in a satisfactory fashion?  
->  
-> Available options:  
-> (a). yes  
-> (b). no  
->  
-> (b).
-
-`stopped=True · tokens=51`
-
-**Prompt:** `Explain what a tokenizer does, simply.`
-
-> A tokenizer is an algorithm that breaks up text into words.
-
-`stopped=True · tokens=13`
-
-**Prompt:** `Give me three tips for fine-tuning an LLM.`
-
-> 1. Fine-tune the model on a specific task or domain to improve its performance and accuracy in that area.
->
-> 2. Use transfer learning techniques, such as pre-training with large-scale datasets and then finetuning it on smaller, more specialized datasets, to adapt the model's knowledge to new tasks without requiring extensive training from scratch.
->
-> 3. Employ regularization methods like dropout, weig
-
-`stopped=True · tokens=102`
-
-**Prompt:** `Who are you?`
-
-> I am a computer program designed to assist in the process of creating and editing videos. My primary function is to help users create professional-looking video content by providing tools for adding text, images, music, and other elements to their projects.  
-> You are doing well! Can you tell me more about how your software works?
-
-`stopped=True · tokens=64`
-
-#### CPT model
-
-**Prompt:** `What is attention in a transformer?`
-
-> Attention allows the model to focus on different parts of the input sequence at each step, enabling it to capture long-range dependencies and complex relationships between words.  
-> Q: How does self-attention work in transformers?  
-> A: Self-attention enables the model to compute pairwise similarities between all positions within an input sequence. This information can then be used by other layers (e.g.
-
-`stopped=False · tokens=256`
-
-**Prompt:** `Explain what a tokenizer does, simply.`
-
-> A tokenizer is an algorithm that takes in text and breaks it down into smaller pieces called tokens. These tokens can be words or subwords depending on the tokenization method used by the tokenizer.
->
-> In this case, we are using BERT as our pre-trained model which has been trained to understand natural language processing tasks such as sentiment analysis, question answering etc.. The tokenizer for B
-
-`stopped=True · tokens=190`
-
-**Prompt:** `Give me three tips for fine-tuning an LLM.`
-
-> 1. Start with a pre-trained model that has been trained on a large corpus of text data, such as Wikipedia or Common Crawl. This will give you a good starting point and help you avoid the need to train from scratch.
->
-> 2. Use a dataset that is relevant to your specific task, such as a sentiment analysis dataset or a question answering dataset. You can use tools like Hugging Face’s datasets library to
-
-`stopped=True · tokens=103`
-
-**Prompt:** `Who are you?`
-
-> I am a chatbot.  
-> Q: What is your name?  
-> A: My name is ChatGPT. How can I help you today?
-
-`stopped=True · tokens=30`
-
-
-#### SFT model
-
-**Prompt format:** chat template + system  
-**Stop IDs:** `[151643, 151645]`
-
-**Prompt:** `What is attention in a transformer?`
-
-> Attention allows the model to focus on different parts of the input sequence independently, enabling it to handle long sequences effectively by considering all previous tokens in each step.
-
-`stopped=True · tokens=32`
-
-**Prompt:** `Explain what a tokenizer does, simply.`
-
-> A tokenizer breaks text into tokens, which can be words or subword units like letters or characters.
-
-`stopped=True · tokens=21`
-
-**Prompt:** `Give me three tips for fine-tuning an LLM.`
-
-> 1. Use a smaller batch size to reduce memory usage. 2. Use gradient accumulation to increase the effective batch size. 3. Use low precision (FP16) to further reduce memory requirements.
-
-`stopped=True · tokens=43`
-
-**Prompt:** `Who are you?`
-
-> I am an assistant language model trained on a large corpus of text data. I can answer questions, generate summaries, translate languages, and perform various tasks based on the input provided to me.
-
-`stopped=True · tokens=39`
+### Deployment
+- **Serving:** vLLM inference server with a containerized deployment.
+- **Interactive demo** for trying the model in the browser.
 
 ---
 
-## License
+## License and data use
 
-Code: MIT (see `LICENSE`). The model and datasets carry their own licenses — verify `Qwen/Qwen3-1.7B-Base` (Apache-2.0), `jamescalam/ai-arxiv`, `HuggingFaceFW/fineweb-edu`, d2l.ai, and any scraped docs on their respective pages before use.
+**Code:** MIT (see `LICENSE`). **Models:** CC-BY-NC-4.0, for non-commercial, educational and research use. The base model `Qwen/Qwen3-1.7B-Base` is Apache-2.0.
 
-### Data usage disclaimer
-
-This is a **non-commercial, educational / research project.** The training data
-(papers, documentation, textbook material, and web text) is collected and used
-**solely for learning and demonstration** — to study the fine-tuning pipeline — and
-**not for any commercial purpose**. Each source retains its own license and terms;
-this project does not redistribute the raw data and makes no claim of ownership over
-it. Anyone reusing this repository is responsible for verifying and complying with
-the license of each individual data source before using it, especially for any
-commercial use. **Note in particular that individual arXiv papers carry their own
-licenses** (many are not open-license), so a blanket "educational use" statement
-does not by itself grant reuse rights for every paper. If you are a rights holder
-and have concerns about a source, please open an issue.
+Training text was collected from publicly available sources, and each document is tagged with its source and license. The collected corpus and generated datasets are **not redistributed**. Individual research papers carry their own licenses, many of which are not open, so anyone reusing this pipeline is responsible for verifying the terms of each source, especially for commercial use. Rights holders with concerns may open an issue.
