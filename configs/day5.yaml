@@ -1,0 +1,37 @@
+ablation:
+  merged_dir: artifacts/sft-from-base-merged
+  output_dir: artifacts/sft-from-base
+  sft_config: configs/day3.yaml
+behavior:
+  max_new_tokens: 400
+chat:
+  system_prompt: You are a helpful assistant with expertise in machine learning and
+    large language models. Answer the user's question accurately and directly. Explain
+    concepts clearly and acknowledge uncertainty when you are unsure.
+judge:
+  judge_model: Qwen/Qwen3-8B
+  temperature: 0.0
+models:
+  base: Qwen/Qwen3-1.7B-Base
+  cpt: vinmlops/cpt-v2
+  dpo: vinmlops/dpo-v1
+  instruct: Qwen/Qwen3-1.7B
+  sft: vinmlops/sft-v2
+  sft_from_base: artifacts/sft-from-base
+paths:
+  dpo_candidates: data/dpo/candidates.jsonl
+  failure_analysis_draft: docs/failure_analysis_draft.md
+  leakage_report: evaluation/day5_leakage.json
+  reproduce_doc: docs/REPRODUCE.md
+  results: evaluation/day5_results.json
+  sft_pairs: data/sft/judged_pairs.jsonl
+  win_rate_results: evaluation/day5_win_rate.json
+perplexity:
+  block_size: 1024
+  domain_heldout: data/eval_heldout/heldout.jsonl
+  general_heldout: data/eval_heldout/general_eval.jsonl
+  max_docs: 30
+  max_tokens: 50000
+win_rate:
+  judge_max_tokens: 200
+  max_new_tokens: 1024
