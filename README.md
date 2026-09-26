@@ -2,10 +2,11 @@
 
 **An end-to-end post-training pipeline that turns an open base language model into a domain chat assistant: continued pretraining, supervised fine-tuning, preference optimization, and rigorous evaluation, on a single GPU.**
 
-```
-Qwen3-1.7B-Base ──CPT──▶ cpt-v2 ──SFT──▶ sft-v2 ──DPO──▶ dpo-v1
-   (text completer)       (domain-adapted)   (instruction-following)   (preference-tuned)
-```
+<p align="center">
+  <img src="docs/images/architecture.png" alt="From base LLM to domain chat assistant: CPT → SFT → DPO pipeline" width="100%">
+</p>
+
+**Try it live:** [Hugging Face Space demo](https://huggingface.co/spaces/vinmlops/llm-from-base-to-assistant)
 
 | | |
 |---|---|
@@ -14,6 +15,7 @@ Qwen3-1.7B-Base ──CPT──▶ cpt-v2 ──SFT──▶ sft-v2 ──DPO─
 | **Stack** | PyTorch · Transformers · TRL · PEFT · vLLM · Datasets |
 | **Hardware** | One 48 GB GPU |
 | **Released models** | [`cpt-v2`](https://huggingface.co/vinmlops/cpt-v2) · [`sft-v2`](https://huggingface.co/vinmlops/sft-v2) · [`dpo-v1`](https://huggingface.co/vinmlops/dpo-v1) |
+| **Live demo** | [huggingface.co/spaces/vinmlops/llm-from-base-to-assistant](https://huggingface.co/spaces/vinmlops/llm-from-base-to-assistant) |
 
 ---
 
@@ -86,6 +88,7 @@ llm-from-base-to-assistant/
 ├── scripts/        # environment and model inspection utilities
 ├── tests/          # masking, packing, judge-logic and statistics tests
 └── docs/           # results and reproducibility report
+    └── images/     # architecture diagram
 ```
 
 ---
@@ -157,7 +160,7 @@ For general (non-ML) questions, omit the system message; this matches how the mo
 
 ## Known limitations
 
-- **Concise responses.** Answers are accurate but brief (~40–60 tokens), a style inherited from the SFT data. Larger post-trained assistants give considerably more detailed explanations.
+- **Concise responses.** Answers are accurate but brief (~40–60 tokens), a style inherited from the SFT data. This is the "correct but concise" limitation found in evaluation. Larger post-trained assistants give considerably more detailed explanations.
 - **Uncertainty handling.** The model can state unverifiable facts confidently instead of acknowledging uncertainty.
 - **Scale.** A 1.7B model with a modest corpus and preference set; not intended for production or critical use.
 - **Evaluation scope.** LLM-judge-based quality metrics on a 38-prompt behavior suite; standard benchmarks and human evaluation are not yet included.
@@ -196,7 +199,7 @@ For general (non-ML) questions, omit the system message; this matches how the mo
 
 ### Deployment
 - **Serving:** vLLM inference server with a containerized deployment.
-- **Interactive demo** for trying the model in the browser.
+- **Interactive demo:** ✅ live on [Hugging Face Spaces](https://huggingface.co/spaces/vinmlops/llm-from-base-to-assistant).
 
 ---
 
